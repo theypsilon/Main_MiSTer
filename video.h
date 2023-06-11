@@ -12,6 +12,7 @@ struct VideoInfo
 	uint32_t htime;
 	uint32_t vtime;
 	uint32_t ptime;
+	uint32_t ctime;
 	uint32_t vtimeh;
 	uint32_t arx;
 	uint32_t ary;
@@ -24,6 +25,8 @@ struct VideoInfo
     bool interlaced;
     bool rotated;
 };
+
+void  video_init();
 
 int   video_get_scaler_flt(int type);
 void  video_set_scaler_flt(int type, int n);
@@ -39,9 +42,10 @@ int   video_get_shadow_mask_mode();
 void  video_set_shadow_mask_mode(int n);
 char* video_get_shadow_mask(int only_name = 1);
 void  video_set_shadow_mask(const char *name);
-void  video_loadPreset(char *name);
+void  video_loadPreset(char *name, bool save);
 
-void  video_mode_load();
+void video_cfg_reset();
+
 void  video_mode_adjust();
 
 int   hasAPI1_5();
@@ -53,12 +57,8 @@ int video_bg_has_picture();
 int video_chvt(int num);
 void video_cmd(char *cmd);
 
-bool video_is_rotated();
-bool video_supports_pr();
-
 void video_core_description(char *str, size_t len);
 void video_scaler_description(char *str, size_t len);
 char* video_get_core_mode_name(int with_vrefresh = 1);
-
 
 #endif // VIDEO_H

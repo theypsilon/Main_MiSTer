@@ -3,6 +3,8 @@
 
 #include "../../cd.h"
 
+//#define SATURN_DEBUG				1
+
 // CDD command
 #define SATURN_COMM_NOP				0x00
 #define SATURN_COMM_SEEK_RING		0x02
@@ -25,14 +27,12 @@
 #define SATURN_STAT_OPEN			0x80
 #define SATURN_STAT_NODISK			0x83
 #define SATURN_STAT_SEEK_RING		0xB2
-#define SATURN_STAT_SEEK_RING2		0xB6
 
 typedef enum {
 	Idle,
 	Open,
 	ReadTOC,
 	Read,
-	Play,
 	Pause,
 	Stop,
 	Seek,
@@ -61,11 +61,19 @@ public:
 private:
 	toc_t toc;
 	int lba;
-	int index;
+	int track;
 	int seek_lba;
 	uint16_t sectorSize;
 	int toc_pos;
 	satstate_t next_state;
+	bool lid_open;
+	bool stop_pend;
+	bool seek_pend;
+	bool read_pend;
+	bool seek_ring;
+	bool seek_ring2;
+	bool pause_pend;
+	bool read_toc;
 	uint8_t stat[12];
 	uint8_t comm[12];
 	uint8_t cd_buf[4096 + 2];
@@ -76,11 +84,12 @@ private:
 	void LBAToMSF(int lba, msf_t* msf);
 	int GetFAD(uint8_t* cmd);
 	void SetChecksum(uint8_t* stat);
+	int CheckCommand(uint8_t* cmd);
 	void ReadData(uint8_t *buf);
-	int ReadCDDA(uint8_t *buf);
+	int ReadCDDA(uint8_t *buf, int first);
 	void MakeSecureRingData(uint8_t *buf);
 	int DataSectorSend(uint8_t* header, int speed);
-	int AudioSectorSend();
+	int AudioSectorSend(int first);
 	int RingDataSend(uint8_t* header, int speed);
 };
 

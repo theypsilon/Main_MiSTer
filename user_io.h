@@ -72,6 +72,7 @@
 #define UIO_SHADOWMASK  0x3E
 #define UIO_GET_RUMBLE  0x3F
 #define UIO_GET_FB_PAR  0x40
+#define UIO_SET_YC_PAR  0x41
 
 // codes as used by 8bit for file loading from OSD
 #define FIO_FILE_TX     0x53
@@ -197,7 +198,7 @@ uint32_t user_io_get_uart_mode();
 
 void user_io_mouse(unsigned char b, int16_t x, int16_t y, int16_t w);
 void user_io_kbd(uint16_t key, int press);
-char* user_io_create_config_name();
+char* user_io_create_config_name(int with_ver = 0);
 int user_io_get_joy_transl();
 void user_io_digital_joystick(unsigned char, uint32_t, int);
 void user_io_l_analog_joystick(unsigned char, char, char);
@@ -238,6 +239,7 @@ uint16_t sdram_sz(int sz = -1);
 int user_io_is_dualsdr();
 uint16_t altcfg(int alt = -1);
 
+void MakeFile(const char * filename, const char * data);
 int GetUARTMode();
 void SetUARTMode(int mode);
 int GetMidiLinkMode();
@@ -264,7 +266,9 @@ char is_sharpmz();
 char is_menu();
 char is_x86();
 char is_snes();
+char is_sgb();
 char is_neogeo();
+char is_neogeo_cd();
 char is_megacd();
 char is_pce();
 char is_archie();
@@ -274,6 +278,7 @@ char is_st();
 char is_psx();
 char is_arcade();
 char is_saturn();
+char is_pcxt();
 
 #define HomeDir(x) user_io_get_core_path(x)
 #define CoreName user_io_get_core_name()

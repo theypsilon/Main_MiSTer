@@ -25,8 +25,12 @@
 #include "fpga_io.h"
 #include "osd.h"
 #include "video.h"
+#include "audio.h"
 #include "joymapping.h"
 #include "support.h"
+#include "profiling.h"
+#include "gamecontroller_db.h"
+#include "str_util.h"
 
 #define NUMDEV 30
 #define NUMPLAYERS 6
@@ -35,6 +39,7 @@
 
 char joy_bnames[NUMBUTTONS][32] = {};
 int  joy_bcount = 0;
+static struct pollfd pool[NUMDEV + 3];
 
 static int ev2amiga[] =
 {
@@ -384,16 +389,16 @@ static const int ev2ps2[] =
 	0x70, //82  KEY_KP0
 	0x71, //83  KEY_KPDOT
 	NONE, //84  ???
-	NONE, //85  KEY_ZENKAKU
+	0x0e, //85  KEY_ZENKAKU
 	0x61, //86  KEY_102ND
 	0x78, //87  KEY_F11
 	0x07, //88  KEY_F12
-	NONE, //89  KEY_RO
-	NONE, //90  KEY_KATAKANA
-	NONE, //91  KEY_HIRAGANA
-	NONE, //92  KEY_HENKAN
-	NONE, //93  KEY_KATAKANA
-	NONE, //94  KEY_MUHENKAN
+	0x13, //89  KEY_RO
+	0x13, //90  KEY_KATAKANA
+	0x13, //91  KEY_HIRAGANA
+	0x64, //92  KEY_HENKAN
+	0x13, //93  KEY_KATAKANA
+	0x67, //94  KEY_MUHENKAN
 	NONE, //95  KEY_KPJPCOMMA
 	EXT | 0x5a, //96  KEY_KPENTER
 	RCTRL | EXT | 0x14, //97  KEY_RIGHTCTRL
@@ -423,10 +428,10 @@ static const int ev2ps2[] =
 	NONE, //121 KEY_KPCOMMA
 	NONE, //122 KEY_HANGEUL
 	NONE, //123 KEY_HANJA
-	NONE, //124 KEY_YEN
+	0x6a, //124 KEY_YEN
 	LGUI | EXT | 0x1f, //125 KEY_LEFTMETA
 	RGUI | EXT | 0x27, //126 KEY_RIGHTMETA
-	NONE, //127 KEY_COMPOSE
+	EXT | 0x2f, //127 KEY_COMPOSE
 	NONE, //128 KEY_STOP
 	NONE, //129 KEY_AGAIN
 	NONE, //130 KEY_PROPS
@@ -1125,7 +1130,7 @@ enum QUIRK
 
 typedef struct
 {
-	uint16_t vid, pid;
+	uint16_t bustype, vid, pid, version;
 	char     idstr[256];
 	char     mod;
 
@@ -1185,6 +1190,7 @@ typedef struct
 	char     mac[64];
 
 	int      bind;
+	uint32_t unique_hash;
 	char     devname[32];
 	char     id[80];
 	char     name[128];
@@ -1433,18 +1439,41 @@ int get_map_cancel()
 	return (mapping && !is_menu() && osd_timer && CheckTimer(osd_timer));
 }
 
+static char *get_unique_mapping(int dev, int force_unique = 0)
+{
+	uint32_t vidpid = (input[dev].vid << 16) | input[dev].pid;
+	static char str[128];
+
+	for (uint i = 0; i < cfg.controller_unique_mapping[0]; i++)
+	{
+		if (!cfg.controller_unique_mapping[i + 1]) break;
+		if (force_unique || cfg.controller_unique_mapping[i + 1] == 1 || cfg.controller_unique_mapping[i + 1] == vidpid)
+		{
+			sprintfz(str, "%s_%08x", input[dev].idstr, input[dev].unique_hash);
+			return str;
+		}
+	}
+
+	sprintfz(str, "%s", input[dev].idstr);
+	return str;
+}
+
 static char *get_map_name(int dev, int def)
 {
-	static char name[128];
-	if (def || is_menu()) sprintf(name, "input_%s%s_v3.map", input[dev].idstr, input[dev].mod ? "_m" : "");
-	else sprintf(name, "%s_input_%s%s_v3.map", user_io_get_core_name(), input[dev].idstr, input[dev].mod ? "_m" : "");
+	static char name[1024];
+	char *id = get_unique_mapping(dev);
+
+	if (def || is_menu()) sprintfz(name, "input_%s%s_v3.map", id, input[dev].mod ? "_m" : "");
+	else sprintfz(name, "%s_input_%s%s_v3.map", user_io_get_core_name(), id, input[dev].mod ? "_m" : "");
 	return name;
 }
 
 static char *get_kbdmap_name(int dev)
 {
 	static char name[128];
-	sprintf(name, "kbd_%s.map", input[dev].idstr);
+	char *id = get_unique_mapping(dev);
+
+	sprintfz(name, "kbd_%s.map", id);
 	return name;
 }
 
@@ -1749,7 +1778,7 @@ static void joy_digital(int jnum, uint32_t mask, uint32_t code, char press, int 
 			}
 			else
 			{
-				if (!user_io_osd_is_visible() && press)
+				if (!user_io_osd_is_visible() && press && !cfg.disable_autofire)
 				{
 					if (lastcode[num] && lastmask[num])
 					{
@@ -1844,6 +1873,7 @@ static void joy_digital(int jnum, uint32_t mask, uint32_t code, char press, int 
 
 		if (user_io_osd_is_visible() || (bnum == BTN_OSD))
 		{
+			mask &= ~JOY_BTN3;
 			if (press)
 			{
 				osdbtn |= mask;
@@ -1948,6 +1978,10 @@ static void joy_digital(int jnum, uint32_t mask, uint32_t code, char press, int 
 				ev.code = KEY_EQUAL;
 				break;
 
+			case JOY_R2:
+				ev.code = KEY_GRAVE;
+				break;
+
 			default:
 				ev.code = (bnum == BTN_OSD) ? KEY_MENU : 0;
 			}
@@ -1988,6 +2022,14 @@ static void joy_digital(int jnum, uint32_t mask, uint32_t code, char press, int 
 
 			case JOY_BTN4:
 				uinp_send_key(KEY_TAB, press);
+				break;
+
+			case JOY_L:
+				uinp_send_key(KEY_PAGEUP, press);
+				break;
+
+			case JOY_R:
+				uinp_send_key(KEY_PAGEDOWN, press);
 				break;
 			}
 		}
@@ -2232,6 +2274,14 @@ static uint16_t def_mmap[] = {
 	0x0000, 0x0002, 0x0001, 0x0002, 0x0000, 0x0000, 0x0000, 0x0000
 };
 
+static void assign_player(int dev, int num, int force = 0)
+{
+	input[dev].num = num;
+	if (JOYCON_COMBINED(dev)) input[input[dev].bind].num = num;
+	store_player(num, dev);
+	printf("Device %s %sassigned to player %d\n", input[dev].id, force ? "forcebly " : "", input[dev].num);
+}
+
 static void input_cb(struct input_event *ev, struct input_absinfo *absinfo, int dev)
 {
 	if (ev->type != EV_KEY && ev->type != EV_ABS && ev->type != EV_REL) return;
@@ -2285,9 +2335,14 @@ static void input_cb(struct input_event *ev, struct input_absinfo *absinfo, int 
 		{
 			if (!load_map(get_map_name(dev, 1), &input[dev].mmap, sizeof(input[dev].mmap)))
 			{
-				memset(input[dev].mmap, 0, sizeof(input[dev].mmap));
-				memcpy(input[dev].mmap, def_mmap, sizeof(def_mmap));
-				//input[dev].has_mmap++;
+				if (!gcdb_map_for_controller(input[sub_dev].bustype, input[sub_dev].vid, input[sub_dev].pid, input[sub_dev].version, pool[sub_dev].fd, input[dev].mmap))
+				{
+					memset(input[dev].mmap, 0, sizeof(input[dev].mmap));
+					memcpy(input[dev].mmap, def_mmap, sizeof(def_mmap));
+					//input[dev].has_mmap++;
+				}
+			} else {
+				gcdb_show_string_for_ctrl_map(input[sub_dev].bustype, input[sub_dev].vid, input[sub_dev].pid, input[sub_dev].version, pool[sub_dev].fd, input[sub_dev].name, input[dev].mmap);
 			}
 			if (!input[dev].mmap[SYS_BTN_OSD_KTGL + 2]) input[dev].mmap[SYS_BTN_OSD_KTGL + 2] = input[dev].mmap[SYS_BTN_OSD_KTGL + 1];
 
@@ -2361,34 +2416,63 @@ static void input_cb(struct input_event *ev, struct input_absinfo *absinfo, int 
 		int assign_btn = ((input[dev].quirk == QUIRK_PDSP || input[dev].quirk == QUIRK_MSSP) && (ev->type == EV_REL || ev->type == EV_KEY));
 		if (!assign_btn && ev->type == EV_KEY && ev->value >= 1 && ev->code >= 256)
 		{
-			for (int i = SYS_BTN_RIGHT; i <= SYS_BTN_START; i++) if (ev->code == input[dev].mmap[i]) assign_btn = 1;
+			for (int i = SYS_BTN_RIGHT; i <= SYS_BTN_START; i++)
+			{
+				if (ev->code == input[dev].mmap[i]) assign_btn = 1;
+			}
 		}
 
 		if (assign_btn)
 		{
-			for (uint8_t num = 1; num < NUMDEV + 1; num++)
+			for (uint8_t i = 0; i < (sizeof(cfg.player_controller) / sizeof(cfg.player_controller[0])); i++)
 			{
-				int found = 0;
-				for (int i = 0; i < NUMDEV; i++)
+				for (int n = 0; n < 8; n++)
 				{
-					if (input[i].quirk != QUIRK_TOUCHGUN)
+					if (!cfg.player_controller[i][n][0]) break;
+
+					if (strcasestr(input[dev].id, cfg.player_controller[i][n]))
 					{
-						// paddles/spinners overlay on top of other gamepad
-						if (!((input[dev].quirk == QUIRK_PDSP || input[dev].quirk == QUIRK_MSSP) ^ (input[i].quirk == QUIRK_PDSP || input[i].quirk == QUIRK_MSSP)))
-						{
-							found = (input[i].num == num);
-							if (found) break;
-						}
+						assign_player(dev, i + 1, 1);
+						break;
+					}
+
+					if (strcasestr(input[dev].sysfs, cfg.player_controller[i][n]))
+					{
+						assign_player(dev, i + 1, 1);
+						break;
+					}
+
+					if (strcasestr(get_unique_mapping(dev, 1), cfg.player_controller[i][n]))
+					{
+						assign_player(dev, i + 1, 1);
+						break;
 					}
 				}
+			}
 
-				if (!found)
+			if (!input[dev].num)
+			{
+				for (uint8_t num = 1; num < NUMDEV + 1; num++)
 				{
-					input[dev].num = num;
-					if (JOYCON_COMBINED(dev)) input[input[dev].bind].num = num;
-					store_player(num, dev);
-					printf("Device %s assigned to player %d\n", input[dev].id, input[dev].num);
-					break;
+					int found = 0;
+					for (int i = 0; i < NUMDEV; i++)
+					{
+						if (input[i].quirk != QUIRK_TOUCHGUN)
+						{
+							// paddles/spinners overlay on top of other gamepad
+							if (!((input[dev].quirk == QUIRK_PDSP || input[dev].quirk == QUIRK_MSSP) ^ (input[i].quirk == QUIRK_PDSP || input[i].quirk == QUIRK_MSSP)))
+							{
+								found = (input[i].num == num);
+								if (found) break;
+							}
+						}
+					}
+
+					if (!found)
+					{
+						assign_player(dev, num);
+						break;
+					}
 				}
 			}
 		}
@@ -2800,16 +2884,24 @@ static void input_cb(struct input_event *ev, struct input_absinfo *absinfo, int 
 							joy_digital(0, JOY_BTN1, 0, ev->value, 0);
 							return;
 						}
-						else if ((input[dev].mmap[SYS_BTN_MENU_FUNC] >> 16) ?
+
+						if ((input[dev].mmap[SYS_BTN_MENU_FUNC] >> 16) ?
 							(ev->code == (input[dev].mmap[SYS_BTN_MENU_FUNC] >> 16)) :
 							(ev->code == input[dev].mmap[SYS_BTN_B]))
 						{
 							joy_digital(0, JOY_BTN2, 0, ev->value, 0);
 							return;
 						}
-						else if (ev->code == input[dev].mmap[SYS_BTN_X])
+
+						if (ev->code == input[dev].mmap[SYS_BTN_X])
 						{
 							joy_digital(0, JOY_BTN4, 0, ev->value, 0);
+							return;
+						}
+
+						if (ev->code == input[dev].mmap[SYS_BTN_Y])
+						{
+							joy_digital(0, JOY_BTN3, 0, ev->value, 0);
 							return;
 						}
 
@@ -2825,11 +2917,15 @@ static void input_cb(struct input_event *ev, struct input_absinfo *absinfo, int 
 							return;
 						}
 
+						if (ev->code == input[dev].mmap[SYS_BTN_START])
+						{
+							joy_digital(0, JOY_L2, 0, ev->value, 0);
+							return;
+						}
+
 						if (ev->code == input[dev].mmap[SYS_BTN_SELECT])
 						{
-							struct input_event key_ev = *ev;
-							key_ev.code = KEY_GRAVE;
-							input_cb(&key_ev, 0, 0);
+							joy_digital(0, JOY_R2, 0, ev->value, 0);
 							return;
 						}
 
@@ -3227,8 +3323,6 @@ void send_map_cmd(int key)
 #define CMD_FIFO "/dev/MiSTer_cmd"
 #define LED_MONITOR "/sys/class/leds/hps_led0/brightness_hw_changed"
 
-static struct pollfd pool[NUMDEV + 3];
-
 // add sequential suffixes for non-merged devices
 void make_unique(uint16_t vid, uint16_t pid, int type)
 {
@@ -3327,6 +3421,10 @@ void mergedevs()
 									strcpy(input[i].id, id);
 									strcpy(input[i].sysfs, sysfs);
 									strcpy(input[i].mac, uniq);
+
+									input[i].unique_hash = str_hash(input[i].id);
+									input[i].unique_hash = str_hash(input[i].mac, input[i].unique_hash);
+
 									input[i].timeout = (strlen(uniq) && strstr(sysfs, "bluetooth")) ? (cfg.bt_auto_disconnect * 10) : 0;
 								}
 							}
@@ -3381,6 +3479,8 @@ void mergedevs()
 				input[i].bind = j;
 				input[i].vid = input[j].vid;
 				input[i].pid = input[j].pid;
+				input[i].version = input[j].version;
+				input[i].bustype = input[j].bustype;
 				input[i].quirk = input[j].quirk;
 				memcpy(input[i].name, input[j].name, sizeof(input[i].name));
 				memcpy(input[i].idstr, input[j].idstr, sizeof(input[i].idstr));
@@ -4220,6 +4320,8 @@ int input_test(int getchar)
 							ioctl(pool[n].fd, EVIOCGID, &id);
 							input[n].vid = id.vendor;
 							input[n].pid = id.product;
+							input[n].version = id.version;
+							input[n].bustype = id.bustype;
 
 							ioctl(pool[n].fd, EVIOCGUNIQ(sizeof(uniq)), uniq);
 							ioctl(pool[n].fd, EVIOCGNAME(sizeof(input[n].name)), input[n].name);
@@ -4487,7 +4589,7 @@ int input_test(int getchar)
 			setup_wheels();
 			for (int i = 0; i < n; i++)
 			{
-				printf("opened %d(%2d): %s (%04x:%04x) %d \"%s\" \"%s\"\n", i, input[i].bind, input[i].devname, input[i].vid, input[i].pid, input[i].quirk, input[i].id, input[i].name);
+				printf("opened %d(%2d): %s (%04x:%04x:%08x) %d \"%s\" \"%s\"\n", i, input[i].bind, input[i].devname, input[i].vid, input[i].pid, input[i].unique_hash, input[i].quirk, input[i].id, input[i].name);
 				restore_player(i);
 			}
 			unflag_players();
@@ -5059,9 +5161,10 @@ int input_test(int getchar)
 								continue;
 							}
 
-							int xval, yval;
+							int xval, yval, zval;
 							xval = ((data[0] & 0x10) ? -256 : 0) | data[1];
 							yval = ((data[0] & 0x20) ? -256 : 0) | data[2];
+							zval = ((data[3] & 0x80) ? -256 : 0) | data[3];
 
 							input_absinfo absinfo = {};
 							absinfo.maximum = 255;
@@ -5069,7 +5172,14 @@ int input_test(int getchar)
 
 							if (input[dev].quirk == QUIRK_MSSP)
 							{
-								int val = cfg.spinner_axis ? yval : xval;
+								int val;
+								if(cfg.spinner_axis == 0)
+									val = xval;
+								else if(cfg.spinner_axis == 1)
+									val = yval;
+								else
+									val = zval;
+
 								int btn = (data[0] & 7) ? 1 : 0;
 								if (input[i].misc_flags != btn)
 								{
@@ -5141,6 +5251,12 @@ int input_test(int getchar)
 					{
 						user_io_screenshot_cmd(cmd);
 					}
+					else if (!strncmp(cmd, "volume ", 7))
+					{
+						if (!strcmp(cmd + 7, "mute")) set_volume(0x81);
+						else if (!strcmp(cmd + 7, "unmute")) set_volume(0x80);
+						else if (cmd[7] >= '0' && cmd[7] <= '7') set_volume(0x40 - 0x30 + cmd[7]);
+					}
 				}
 			}
 
@@ -5185,6 +5301,8 @@ int input_test(int getchar)
 
 int input_poll(int getchar)
 {
+	PROFILE_FUNCTION();
+
 	static int af[NUMPLAYERS] = {};
 	static uint32_t time[NUMPLAYERS] = {};
 	static uint32_t joy_prev[NUMPLAYERS] = {};

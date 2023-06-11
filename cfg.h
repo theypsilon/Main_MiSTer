@@ -13,7 +13,6 @@ typedef struct {
 	uint8_t forced_scandoubler;
 	uint8_t key_menu_as_rgui;
 	uint8_t reset_combo;
-	uint8_t ypbpr;
 	uint8_t csync;
 	uint8_t vga_scaler;
 	uint8_t vga_sog;
@@ -69,17 +68,50 @@ typedef struct {
 	char vfilter_vertical_default[1023];
 	char vfilter_scanlines_default[1023];
 	char shmask_default[1023];
+	char preset_default[1023];
+	char player_controller[6][8][256];
 	uint8_t rumble;
 	uint8_t wheel_force;
 	uint16_t wheel_range;
 	uint8_t hdmi_game_mode;
+	uint8_t vrr_mode;
+	uint8_t vrr_min_framerate;
+	uint8_t vrr_max_framerate;
+	uint8_t vrr_vesa_framerate;
+	uint16_t video_off;
+	uint8_t disable_autofire;
+	uint8_t video_brightness;
+	uint8_t video_contrast;
+	uint8_t video_saturation;
+	uint16_t video_hue;
+	char video_gain_offset[256];
+	uint8_t hdr;
+	uint16_t hdr_max_nits;
+	uint16_t hdr_avg_nits;
+	char vga_mode[16];
+	char vga_mode_int;
+	char ntsc_mode;
+	uint32_t controller_unique_mapping[256];
 } cfg_t;
 
 extern cfg_t cfg;
 
 //// functions ////
 void cfg_parse();
+void cfg_print();
 const char* cfg_get_name(uint8_t alt);
+const char* cfg_get_label(uint8_t alt);
 bool cfg_has_video_sections();
+
+void cfg_error(const char *fmt, ...);
+bool cfg_check_errors(char *msg, size_t max_len);
+
+struct yc_mode
+{
+	char key[64];
+	int64_t phase_inc;
+};
+
+void yc_parse(yc_mode *yc_table, int max);
 
 #endif // __CFG_H__

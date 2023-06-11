@@ -4,6 +4,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
 #include <inttypes.h>
 #include <ctype.h>
@@ -12,12 +13,13 @@
 #include "file_io.h"
 #include "user_io.h"
 #include "video.h"
+#include "support/arcade/mra_loader.h"
 
 cfg_t cfg;
 
 typedef enum
 {
-	UINT8 = 0, INT8, UINT16, INT16, UINT32, INT32, FLOAT, STRING, UINT32ARR
+	UINT8 = 0, INT8, UINT16, INT16, UINT32, INT32, HEX8, HEX16, HEX32, FLOAT, STRING, UINT32ARR, HEX32ARR, STRINGARR
 } ini_vartypes_t;
 
 typedef struct
@@ -25,18 +27,18 @@ typedef struct
 	const char* name;
 	void* var;
 	ini_vartypes_t type;
-	int min;
-	int max;
+	int64_t min;
+	int64_t max;
 } ini_var_t;
 
 static const ini_var_t ini_vars[] =
 {
-	{ "YPBPR", (void*)(&(cfg.ypbpr)), UINT8, 0, 1 },
+	{ "YPBPR", (void*)(&(cfg.vga_mode_int)), UINT8, 0, 1 },
 	{ "COMPOSITE_SYNC", (void*)(&(cfg.csync)), UINT8, 0, 1 },
 	{ "FORCED_SCANDOUBLER", (void*)(&(cfg.forced_scandoubler)), UINT8, 0, 1 },
 	{ "VGA_SCALER", (void*)(&(cfg.vga_scaler)), UINT8, 0, 1 },
 	{ "VGA_SOG", (void*)(&(cfg.vga_sog)), UINT8, 0, 1 },
-	{ "KEYRAH_MODE", (void*)(&(cfg.keyrah_mode)), UINT32, 0, (int)0xFFFFFFFF },
+	{ "KEYRAH_MODE", (void*)(&(cfg.keyrah_mode)), HEX32, 0, 0xFFFFFFFF },
 	{ "RESET_COMBO", (void*)(&(cfg.reset_combo)), UINT8, 0, 3 },
 	{ "KEY_MENU_AS_RGUI", (void*)(&(cfg.key_menu_as_rgui)), UINT8, 0, 1 },
 	{ "VIDEO_MODE", (void*)(cfg.video_conf), STRING, 0, sizeof(cfg.video_conf) - 1 },
@@ -67,20 +69,20 @@ static const ini_var_t ini_vars[] =
 	{ "CONTROLLER_INFO", (void*)(&(cfg.controller_info)), UINT8, 0, 10 },
 	{ "REFRESH_MIN", (void*)(&(cfg.refresh_min)), FLOAT, 0, 150 },
 	{ "REFRESH_MAX", (void*)(&(cfg.refresh_max)), FLOAT, 0, 150 },
-	{ "JAMMA_VID", (void*)(&(cfg.jamma_vid)), UINT16, 0, 0xFFFF },
-	{ "JAMMA_PID", (void*)(&(cfg.jamma_pid)), UINT16, 0, 0xFFFF },
+	{ "JAMMA_VID", (void*)(&(cfg.jamma_vid)), HEX16, 0, 0xFFFF },
+	{ "JAMMA_PID", (void*)(&(cfg.jamma_pid)), HEX16, 0, 0xFFFF },
 	{ "SNIPER_MODE", (void*)(&(cfg.sniper_mode)), UINT8, 0, 1 },
 	{ "BROWSE_EXPAND", (void*)(&(cfg.browse_expand)), UINT8, 0, 1 },
 	{ "LOGO", (void*)(&(cfg.logo)), UINT8, 0, 1 },
 	{ "SHARED_FOLDER", (void*)(&(cfg.shared_folder)), STRING, 0, sizeof(cfg.shared_folder) - 1 },
-	{ "NO_MERGE_VID", (void*)(&(cfg.no_merge_vid)), UINT16, 0, 0xFFFF },
-	{ "NO_MERGE_PID", (void*)(&(cfg.no_merge_pid)), UINT16, 0, 0xFFFF },
-	{ "NO_MERGE_VIDPID", (void*)(cfg.no_merge_vidpid), UINT32ARR, 0, (int)0xFFFFFFFF },
+	{ "NO_MERGE_VID", (void*)(&(cfg.no_merge_vid)), HEX16, 0, 0xFFFF },
+	{ "NO_MERGE_PID", (void*)(&(cfg.no_merge_pid)), HEX16, 0, 0xFFFF },
+	{ "NO_MERGE_VIDPID", (void*)(cfg.no_merge_vidpid), HEX32ARR, 0, 0xFFFFFFFF },
 	{ "CUSTOM_ASPECT_RATIO_1", (void*)(&(cfg.custom_aspect_ratio[0])), STRING, 0, sizeof(cfg.custom_aspect_ratio[0]) - 1 },
 	{ "CUSTOM_ASPECT_RATIO_2", (void*)(&(cfg.custom_aspect_ratio[1])), STRING, 0, sizeof(cfg.custom_aspect_ratio[1]) - 1 },
-	{ "SPINNER_VID", (void*)(&(cfg.spinner_vid)), UINT16, 0, 0xFFFF },
-	{ "SPINNER_PID", (void*)(&(cfg.spinner_pid)), UINT16, 0, 0xFFFF },
-	{ "SPINNER_AXIS", (void*)(&(cfg.spinner_axis)), UINT8, 0, 1 },
+	{ "SPINNER_VID", (void*)(&(cfg.spinner_vid)), HEX16, 0, 0xFFFF },
+	{ "SPINNER_PID", (void*)(&(cfg.spinner_pid)), HEX16, 0, 0xFFFF },
+	{ "SPINNER_AXIS", (void*)(&(cfg.spinner_axis)), UINT8, 0, 2 },
 	{ "SPINNER_THROTTLE", (void*)(&(cfg.spinner_throttle)), INT32, -10000, 10000 },
 	{ "AFILTER_DEFAULT", (void*)(&(cfg.afilter_default)), STRING, 0, sizeof(cfg.afilter_default) - 1 },
 	{ "VFILTER_DEFAULT", (void*)(&(cfg.vfilter_default)), STRING, 0, sizeof(cfg.vfilter_default) - 1 },
@@ -88,6 +90,7 @@ static const ini_var_t ini_vars[] =
 	{ "VFILTER_SCANLINES_DEFAULT", (void*)(&(cfg.vfilter_scanlines_default)), STRING, 0, sizeof(cfg.vfilter_scanlines_default) - 1 },
 	{ "SHMASK_DEFAULT", (void*)(&(cfg.shmask_default)), STRING, 0, sizeof(cfg.shmask_default) - 1 },
 	{ "SHMASK_MODE_DEFAULT", (void*)(&(cfg.shmask_mode_default)), UINT8, 0, 255 },
+	{ "PRESET_DEFAULT", (void*)(&(cfg.preset_default)), STRING, 0, sizeof(cfg.preset_default) - 1 },
 	{ "LOG_FILE_ENTRY", (void*)(&(cfg.log_file_entry)), UINT8, 0, 1 },
 	{ "BT_AUTO_DISCONNECT", (void*)(&(cfg.bt_auto_disconnect)), UINT32, 0, 180 },
 	{ "BT_RESET_BEFORE_PAIR", (void*)(&(cfg.bt_reset_before_pair)), UINT8, 0, 1 },
@@ -96,6 +99,29 @@ static const ini_var_t ini_vars[] =
 	{ "WHEEL_FORCE", (void*)(&(cfg.wheel_force)), UINT8, 0, 100 },
 	{ "WHEEL_RANGE", (void*)(&(cfg.wheel_range)), UINT16, 0, 1000 },
 	{ "HDMI_GAME_MODE", (void *)(&(cfg.hdmi_game_mode)), UINT8, 0, 1},
+	{ "VRR_MODE", (void *)(&(cfg.vrr_mode)), UINT8, 0, 3},
+	{ "VRR_MIN_FRAMERATE", (void *)(&(cfg.vrr_min_framerate)), UINT8, 0, 255},
+	{ "VRR_MAX_FRAMERATE", (void *)(&(cfg.vrr_max_framerate)), UINT8, 0, 255},
+	{ "VRR_VESA_FRAMERATE", (void *)(&(cfg.vrr_vesa_framerate)), UINT8, 0, 255},
+	{ "VIDEO_OFF", (void*)(&(cfg.video_off)), INT16, 0, 3600 },
+	{ "PLAYER_1_CONTROLLER", (void*)(&(cfg.player_controller[0])), STRINGARR, sizeof(cfg.player_controller[0]) / sizeof(cfg.player_controller[0][0]), sizeof(cfg.player_controller[0][0])},
+	{ "PLAYER_2_CONTROLLER", (void*)(&(cfg.player_controller[1])), STRINGARR, sizeof(cfg.player_controller[0]) / sizeof(cfg.player_controller[0][0]), sizeof(cfg.player_controller[0][0])},
+	{ "PLAYER_3_CONTROLLER", (void*)(&(cfg.player_controller[2])), STRINGARR, sizeof(cfg.player_controller[0]) / sizeof(cfg.player_controller[0][0]), sizeof(cfg.player_controller[0][0])},
+	{ "PLAYER_4_CONTROLLER", (void*)(&(cfg.player_controller[3])), STRINGARR, sizeof(cfg.player_controller[0]) / sizeof(cfg.player_controller[0][0]), sizeof(cfg.player_controller[0][0])},
+	{ "PLAYER_5_CONTROLLER", (void*)(&(cfg.player_controller[4])), STRINGARR, sizeof(cfg.player_controller[0]) / sizeof(cfg.player_controller[0][0]), sizeof(cfg.player_controller[0][0])},
+	{ "PLAYER_6_CONTROLLER", (void*)(&(cfg.player_controller[5])), STRINGARR, sizeof(cfg.player_controller[0]) / sizeof(cfg.player_controller[0][0]), sizeof(cfg.player_controller[0][0])},
+	{ "DISABLE_AUTOFIRE", (void *)(&(cfg.disable_autofire)), UINT8, 0, 1},
+	{ "VIDEO_BRIGHTNESS", (void *)(&(cfg.video_brightness)), UINT8, 0, 100},
+	{ "VIDEO_CONTRAST", (void *)(&(cfg.video_contrast)), UINT8, 0, 100},
+	{ "VIDEO_SATURATION", (void *)(&(cfg.video_saturation)), UINT8, 0, 100},
+	{ "VIDEO_HUE", (void *)(&(cfg.video_hue)), UINT16, 0, 360},
+	{ "VIDEO_GAIN_OFFSET", (void *)(&(cfg.video_gain_offset)), STRING, 0, sizeof(cfg.video_gain_offset)},
+	{ "HDR", (void*)(&cfg.hdr), UINT8, 0, 2 },
+	{ "HDR_MAX_NITS", (void*)(&(cfg.hdr_max_nits)), UINT16, 100, 10000},
+	{ "HDR_AVG_NITS", (void*)(&(cfg.hdr_avg_nits)), UINT16, 100, 10000},
+	{ "VGA_MODE", (void*)(&(cfg.vga_mode)), STRING, 0, sizeof(cfg.vga_mode) - 1 },
+	{ "NTSC_MODE", (void *)(&(cfg.ntsc_mode)), UINT8, 0, 2},
+	{ "CONTROLLER_UNIQUE_MAPPING", (void *)(cfg.controller_unique_mapping), UINT32ARR, 0, 0xFFFFFFFF },
 };
 
 static const int nvars = (int)(sizeof(ini_vars) / sizeof(ini_var_t));
@@ -188,6 +214,7 @@ static int ini_get_section(char* buf, const char *vmode)
 
 	if (!strcasecmp(buf, "MiSTer") ||
 		(is_arcade() && !strcasecmp(buf, "arcade")) ||
+		(arcade_is_vertical() && !strcasecmp(buf, "arcade_vertical")) ||
 		((wc_pos >= 0) ? !strncasecmp(buf, user_io_get_core_name(1), wc_pos) : !strcasecmp(buf, user_io_get_core_name(1))) ||
 		((wc_pos >= 0) ? !strncasecmp(buf, user_io_get_core_name(0), wc_pos) : !strcasecmp(buf, user_io_get_core_name(0))))
 	{
@@ -219,6 +246,78 @@ static int ini_get_section(char* buf, const char *vmode)
 	return 0;
 }
 
+static void ini_parse_numeric(const ini_var_t *var, const char *text, void *out)
+{
+	uint32_t u32 = 0;
+	int32_t i32 = 0;
+	float f32 = 0.0f;
+	char *endptr = nullptr;
+
+	bool out_of_range = true;
+	bool invalid_format = false;
+
+	switch(var->type)
+	{
+	case HEX8:
+	case HEX16:
+	case HEX32:
+	case HEX32ARR:
+		invalid_format = strncasecmp(text, "0x", 2);
+		// fall through
+
+	case UINT8:
+	case UINT16:
+	case UINT32:
+	case UINT32ARR:
+		u32 = strtoul(text, &endptr, 0);
+		if (u32 < var->min) u32 = var->min;
+		else if (u32 > var->max) u32 = var->max;
+		else out_of_range = false;
+		break;
+
+	case INT8:
+	case INT16:
+	case INT32:
+		i32 = strtol(text, &endptr, 0);
+		if (i32 < var->min) i32 = var->min;
+		else if (i32 > var->max) i32 = var->max;
+		else out_of_range = false;
+		break;
+
+	case FLOAT:
+		f32 = strtof(text, &endptr);
+		if (f32 < var->min) f32 = var->min;
+		else if (f32 > var->max) f32 = var->max;
+		else out_of_range = false;
+		break;
+
+	default:
+		out_of_range = false;
+		break;
+	}
+
+	if (*endptr) cfg_error("%s: \'%s\' not a number", var->name, text);
+	else if (out_of_range) cfg_error("%s: \'%s\' out of range", var->name, text);
+	else if (invalid_format) cfg_error("%s: \'%s\' invalid format", var->name, text);
+
+	switch (var->type)
+	{
+	case HEX8:
+	case UINT8: *(uint8_t*)out = u32; break;
+	case INT8: *(int8_t*)out = i32; break;
+	case HEX16:
+	case UINT16: *(uint16_t*)out = u32; break;
+	case HEX32ARR:
+	case UINT32ARR: *(uint32_t*)out = u32; break;
+	case INT16: *(int16_t*)out = i32; break;
+	case HEX32:
+	case UINT32: *(uint32_t*)out = u32; break;
+	case INT32: *(int32_t*)out = i32; break;
+	case FLOAT: *(float*)out = f32; break;
+	default: break;
+	}
+}
+
 static void ini_parse_var(char* buf)
 {
 	// find var
@@ -241,62 +340,51 @@ static void ini_parse_var(char* buf)
 		if (!strcasecmp(buf, ini_vars[j].name)) var_id = j;
 	}
 
-	// get data
-	if (var_id != -1)
+	if (var_id == -1)
+	{
+		cfg_error("%s: unknown option", buf);
+	}
+	else // get data
 	{
 		i++;
 		while (buf[i] == '=' || CHAR_IS_SPACE(buf[i])) i++;
 		ini_parser_debugf("Got VAR '%s' with VALUE %s", buf, buf+i);
 
-		switch (ini_vars[var_id].type)
+		const ini_var_t *var = &ini_vars[var_id];
+
+		switch (var->type)
 		{
-		case UINT8:
-			*(uint8_t*)(ini_vars[var_id].var) = strtoul(&(buf[i]), NULL, 0);
-			if (*(uint8_t*)(ini_vars[var_id].var) > ini_vars[var_id].max) *(uint8_t*)(ini_vars[var_id].var) = ini_vars[var_id].max;
-			if (*(uint8_t*)(ini_vars[var_id].var) < ini_vars[var_id].min) *(uint8_t*)(ini_vars[var_id].var) = ini_vars[var_id].min;
+		case STRING:
+			memset(var->var, 0, var->max);
+			snprintf((char*)(var->var), var->max, "%s", buf+i);
 			break;
-		case INT8:
-			*(int8_t*)(ini_vars[var_id].var) = strtol(&(buf[i]), NULL, 0);
-			if (*(int8_t*)(ini_vars[var_id].var) > ini_vars[var_id].max) *(int8_t*)(ini_vars[var_id].var) = ini_vars[var_id].max;
-			if (*(int8_t*)(ini_vars[var_id].var) < ini_vars[var_id].min) *(int8_t*)(ini_vars[var_id].var) = ini_vars[var_id].min;
-			break;
-		case UINT16:
-			*(uint16_t*)(ini_vars[var_id].var) = strtoul(&(buf[i]), NULL, 0);
-			if (*(uint16_t*)(ini_vars[var_id].var) > ini_vars[var_id].max) *(uint16_t*)(ini_vars[var_id].var) = ini_vars[var_id].max;
-			if (*(uint16_t*)(ini_vars[var_id].var) < ini_vars[var_id].min) *(uint16_t*)(ini_vars[var_id].var) = ini_vars[var_id].min;
-			break;
-		case UINT32ARR:
+
+		case STRINGARR:
 			{
-				uint32_t *arr = (uint32_t*)ini_vars[var_id].var;
-				uint32_t pos = ++arr[0];
-				arr[pos] = strtoul(&(buf[i]), NULL, 0);
-				if (arr[pos] > (uint32_t)ini_vars[var_id].max) arr[pos] = (uint32_t)ini_vars[var_id].max;
-				if (arr[pos] < (uint32_t)ini_vars[var_id].min) arr[pos] = (uint32_t)ini_vars[var_id].min;
+				int item_sz = var->max;
+				for (int n = 0; n < var->min; n++)
+				{
+					char *str = ((char*)var->var) + (n * item_sz);
+					if (!strlen(str))
+					{
+						snprintf(str, item_sz, "%s", buf + i);
+						break;
+					}
+				}
 			}
 			break;
-		case INT16:
-			*(int16_t*)(ini_vars[var_id].var) = strtol(&(buf[i]), NULL, 0);
-			if (*(int16_t*)(ini_vars[var_id].var) > ini_vars[var_id].max) *(int16_t*)(ini_vars[var_id].var) = ini_vars[var_id].max;
-			if (*(int16_t*)(ini_vars[var_id].var) < ini_vars[var_id].min) *(int16_t*)(ini_vars[var_id].var) = ini_vars[var_id].min;
+
+		case HEX32ARR:
+		case UINT32ARR:
+			{
+				uint32_t *arr = (uint32_t*)var->var;
+				uint32_t pos = ++arr[0];
+				ini_parse_numeric(var, &buf[i], &arr[pos]);
+			}
 			break;
-		case UINT32:
-			*(uint32_t*)(ini_vars[var_id].var) = strtoul(&(buf[i]), NULL, 0);
-			if (*(uint32_t*)(ini_vars[var_id].var) > (uint32_t)ini_vars[var_id].max) *(uint32_t*)(ini_vars[var_id].var) = ini_vars[var_id].max;
-			if (*(uint32_t*)(ini_vars[var_id].var) < (uint32_t)ini_vars[var_id].min) *(uint32_t*)(ini_vars[var_id].var) = ini_vars[var_id].min;
-			break;
-		case INT32:
-			*(int32_t*)(ini_vars[var_id].var) = strtol(&(buf[i]), NULL, 0);
-			if (*(int32_t*)(ini_vars[var_id].var) > ini_vars[var_id].max) *(int32_t*)(ini_vars[var_id].var) = ini_vars[var_id].max;
-			if (*(int32_t*)(ini_vars[var_id].var) < ini_vars[var_id].min) *(int32_t*)(ini_vars[var_id].var) = ini_vars[var_id].min;
-			break;
-		case FLOAT:
-			*(float*)(ini_vars[var_id].var) = strtof(&(buf[i]), NULL);
-			if (*(float*)(ini_vars[var_id].var) > ini_vars[var_id].max) *(float*)(ini_vars[var_id].var) = ini_vars[var_id].max;
-			if (*(float*)(ini_vars[var_id].var) < ini_vars[var_id].min) *(float*)(ini_vars[var_id].var) = ini_vars[var_id].min;
-			break;
-		case STRING:
-			memset(ini_vars[var_id].var, 0, ini_vars[var_id].max);
-			strncpy((char*)(ini_vars[var_id].var), &(buf[i]), ini_vars[var_id].max);
+
+		default:
+			ini_parse_numeric(var, &buf[i], var->var);
 			break;
 		}
 	}
@@ -349,20 +437,79 @@ static void ini_parse(int alt, const char *vmode)
 	FileClose(&ini_file);
 }
 
+static constexpr int CFG_ERRORS_MAX = 4;
+static constexpr int CFG_ERRORS_STRLEN = 128;
+static char cfg_errors[CFG_ERRORS_MAX][CFG_ERRORS_STRLEN];
+static int cfg_error_count = 0;
+
 const char* cfg_get_name(uint8_t alt)
 {
+	static int done = 0;
+	static char names[3][64] = {};
 	static char name[64];
-	strcpy(name, "MiSTer.ini");
 
-	if (alt == 1)
+	if (!done)
 	{
-		strcpy(name, "MiSTer_alt_1.ini");
-		if (FileExists(name)) return name;
-		return "MiSTer_alt.ini";
+		done = 1;
+		DIR *d = opendir(getRootDir());
+		if (!d)
+		{
+			printf("Couldn't open dir: %s\n", getRootDir());
+		}
+		else
+		{
+			struct dirent *de;
+			int i = 0;
+			while ((de = readdir(d)) && i < 3)
+			{
+				int len = strlen(de->d_name);
+				if (!strncasecmp(de->d_name, "MiSTer_", 7) && !strcasecmp(de->d_name + len - 4, ".ini"))
+				{
+					snprintf(names[i], sizeof(names[0]), "%s", de->d_name);
+					i++;
+				}
+			}
+			closedir(d);
+		}
+
+		for (int i = 1; i < 3; i++)
+		{
+			for (int j = 1; j < 3; j++)
+			{
+				if ((!names[j - 1][0] && names[j][0]) || (names[j - 1][0] && names[j][0] && strcasecmp(names[j - 1], names[j]) > 0))
+				{
+					strcpy(name, names[j - 1]);
+					strcpy(names[j - 1], names[j]);
+					strcpy(names[j], name);
+				}
+			}
+		}
 	}
 
-	if (alt && alt < 4) sprintf(name, "MiSTer_alt_%d.ini", alt);
+	strcpy(name, "MiSTer.ini");
+	if (alt && alt < 4) strcpy(name, names[alt-1]);
 	return name;
+}
+
+const char* cfg_get_label(uint8_t alt)
+{
+	if (!alt) return "Main";
+
+	const char *name = cfg_get_name(alt);
+	if (!name[0]) return " -- ";
+
+	static char label[6];
+	snprintf(label, sizeof(label), "%s", name + 7);
+	char *p = strrchr(label, '.');
+	if (p) *p = 0;
+	if (!strcasecmp(label, "alt"))   return "Alt1";
+	if (!strcasecmp(label, "alt_1")) return "Alt1";
+	if (!strcasecmp(label, "alt_2")) return "Alt2";
+	if (!strcasecmp(label, "alt_3")) return "Alt3";
+
+	for (int i = 0; i < 4; i++) if (!label[i]) label[i] = ' ';
+	label[4] = 0;
+	return label;
 }
 
 void cfg_parse()
@@ -376,17 +523,212 @@ void cfg_parse()
 	cfg.rumble = 1;
 	cfg.wheel_force = 50;
 	cfg.dvi_mode = 2;
+	cfg.hdr = 0;
+	cfg.hdr_max_nits = 1000;
+	cfg.hdr_avg_nits = 250;
+	cfg.video_brightness = 50;
+	cfg.video_contrast = 50;
+	cfg.video_saturation = 100;
+	cfg.video_hue = 0;
+	strcpy(cfg.video_gain_offset, "1, 0, 1, 0, 1, 0");
 	has_video_sections = false;
 	using_video_section = false;
+	cfg_error_count = 0;
 	ini_parse(altcfg(), video_get_core_mode_name(1));
 	if (has_video_sections && !using_video_section)
 	{
 		// second pass to look for section without vrefresh
 		ini_parse(altcfg(), video_get_core_mode_name(0));
 	}
+
+	if (strlen(cfg.vga_mode))
+	{
+		if (!strcasecmp(cfg.vga_mode, "rgb")) cfg.vga_mode_int = 0;
+		if (!strcasecmp(cfg.vga_mode, "ypbpr")) cfg.vga_mode_int = 1;
+		if (!strcasecmp(cfg.vga_mode, "svideo")) cfg.vga_mode_int = 2;
+		if (!strcasecmp(cfg.vga_mode, "cvbs")) cfg.vga_mode_int = 3;
+	}
 }
 
 bool cfg_has_video_sections()
 {
 	return has_video_sections;
+}
+
+
+void cfg_error(const char *fmt, ...)
+{
+	if (cfg_error_count >= CFG_ERRORS_MAX) return;
+
+	va_list args;
+	va_start(args, fmt);
+	vsnprintf(cfg_errors[cfg_error_count], CFG_ERRORS_STRLEN, fmt, args);
+	va_end(args);
+
+	printf("ERROR CFG: %s\n", cfg_errors[cfg_error_count]);
+
+	cfg_error_count += 1;
+}
+
+bool cfg_check_errors(char *msg, size_t max_len)
+{
+	msg[0] = '\0';
+
+	if (cfg_error_count == 0) return false;
+
+	int pos = snprintf(msg, max_len, "%d INI Error%s\n---", cfg_error_count, cfg_error_count > 1 ? "s" : "");
+
+	for (int i = 0; i < cfg_error_count; i++)
+	{
+		pos += snprintf(msg + pos, max_len - pos, "\n%s\n", cfg_errors[i]);
+	}
+
+	return true;
+}
+
+void cfg_print()
+{
+	printf("Loaded config:\n--------------\n");
+	for (uint i = 0; i < (sizeof(ini_vars) / sizeof(ini_vars[0])); i++)
+	{
+		switch (ini_vars[i].type)
+		{
+		case UINT8:
+			printf("  %s=%u\n", ini_vars[i].name, *(uint8_t*)ini_vars[i].var);
+			break;
+
+		case UINT16:
+			printf("  %s=%u\n", ini_vars[i].name, *(uint16_t*)ini_vars[i].var);
+			break;
+
+		case UINT32:
+			printf("  %s=%u\n", ini_vars[i].name, *(uint32_t*)ini_vars[i].var);
+			break;
+
+		case UINT32ARR:
+			if (*(uint32_t*)ini_vars[i].var)
+			{
+				uint32_t* arr = (uint32_t*)ini_vars[i].var;
+				for (uint32_t n = 0; n < arr[0]; n++) printf("  %s=%u\n", ini_vars[i].name, arr[n + 1]);
+			}
+			break;
+
+		case HEX8:
+			printf("  %s=0x%02X\n", ini_vars[i].name, *(uint8_t*)ini_vars[i].var);
+			break;
+
+		case HEX16:
+			printf("  %s=0x%04X\n", ini_vars[i].name, *(uint16_t*)ini_vars[i].var);
+			break;
+
+		case HEX32:
+			printf("  %s=0x%08X\n", ini_vars[i].name, *(uint32_t*)ini_vars[i].var);
+			break;
+
+		case HEX32ARR:
+			if (*(uint32_t*)ini_vars[i].var)
+			{
+				uint32_t* arr = (uint32_t*)ini_vars[i].var;
+				for (uint32_t n = 0; n < arr[0]; n++) printf("  %s=0x%08X\n", ini_vars[i].name, arr[n + 1]);
+			}
+			break;
+
+		case INT8:
+			printf("  %s=%d\n", ini_vars[i].name, *(int8_t*)ini_vars[i].var);
+			break;
+
+		case INT16:
+			printf("  %s=%d\n", ini_vars[i].name, *(int16_t*)ini_vars[i].var);
+			break;
+
+		case INT32:
+			printf("  %s=%d\n", ini_vars[i].name, *(int32_t*)ini_vars[i].var);
+			break;
+
+		case FLOAT:
+			printf("  %s=%f\n", ini_vars[i].name, *(float*)ini_vars[i].var);
+			break;
+
+		case STRING:
+			if (*(uint32_t*)ini_vars[i].var) printf("  %s=%s\n", ini_vars[i].name, (char*)ini_vars[i].var);
+			break;
+
+		case STRINGARR:
+			for (int n = 0; n < ini_vars[i].min; n++)
+			{
+				char *str = ((char*)ini_vars[i].var) + (n*ini_vars[i].max);
+				if (!strlen(str)) break;
+				printf("  %s=%s\n", ini_vars[i].name, str);
+			}
+			break;
+		}
+	}
+	printf("--------------\n");
+}
+
+static int yc_parse_mode(char* buf, yc_mode *mode)
+{
+	int i = 0;
+	while (1)
+	{
+		if (buf[i] == '=' || CHAR_IS_LINEEND(buf[i]))
+		{
+			buf[i] = 0;
+			break;
+		}
+		else if (!buf[i]) return 0;
+		i++;
+	}
+
+	i++;
+	while (buf[i] == '=' || CHAR_IS_SPACE(buf[i])) i++;
+	ini_parser_debugf("Got yc_mode '%s' with VALUE %s", buf, buf + i);
+
+	snprintf(mode->key, sizeof(mode->key), "%s", buf);
+	mode->phase_inc = strtoull(buf + i, 0, 0);
+	if (!mode->phase_inc)
+	{
+		printf("ERROR: cannot parse YC phase_inc: '%s'\n", buf + i);
+		return 0;
+	}
+
+	return 1;
+}
+
+void yc_parse(yc_mode *yc_table, int max)
+{
+	memset(yc_table, 0, max * sizeof(yc_mode));
+
+	static char line[INI_LINE_SIZE];
+	int eof;
+
+	memset(line, 0, sizeof(line));
+	memset(&ini_file, 0, sizeof(ini_file));
+
+	const char *corename = user_io_get_core_name(1);
+	int corename_len = strlen(corename);
+
+	const char *name = "yc.txt";
+	if (!FileOpen(&ini_file, name))	return;
+
+	ini_parser_debugf("Opened file %s with size %llu bytes.", name, ini_file.size);
+
+	ini_pt = 0;
+	int n = 0;
+
+	while (n < max)
+	{
+		// get line
+		eof = ini_getline(line);
+		if (!strncasecmp(line, corename, corename_len))
+		{
+			int res = yc_parse_mode(line, &yc_table[n]);
+			if (res) n++;
+		}
+
+		// if end of file, stop
+		if (eof) break;
+	}
+
+	FileClose(&ini_file);
 }

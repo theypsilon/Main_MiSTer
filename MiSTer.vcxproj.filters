@@ -223,6 +223,18 @@
     <ClCompile Include="smbus.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="offload.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="profiling.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="str_util.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="gamecontroller_db.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="battery.h">
@@ -430,6 +442,18 @@
       <Filter>Header Files\support</Filter>
     </ClInclude>
     <ClInclude Include="smbus.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="offload.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="profiling.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="str_util.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="gamecontroller_db.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

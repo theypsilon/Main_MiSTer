@@ -63,6 +63,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "support.h"
 #include "bootcore.h"
 #include "ide.h"
+#include "profiling.h"
 
 /*menu states*/
 enum MENU
@@ -210,7 +211,7 @@ const char *config_scanlines_msg[] = { "Off", "HQ2x", "CRT 25%" , "CRT 50%" , "C
 const char *config_blank_msg[] = { "Blank", "Blank+" };
 const char *config_dither_msg[] = { "off", "SPT", "RND", "S+R" };
 const char *config_autofire_msg[] = { "        AUTOFIRE OFF", "        AUTOFIRE FAST", "        AUTOFIRE MEDIUM", "        AUTOFIRE SLOW" };
-const char *config_cd32pad_msg[] = { "OFF", "ON" };
+const char *config_joystick_mode[] = { "Digital", "Analog", "CD32", "Analog" };
 const char *config_button_turbo_msg[] = { "OFF", "FAST", "MEDIUM", "SLOW" };
 const char *config_button_turbo_choice_msg[] = { "A only", "B only", "A & B" };
 const char *joy_button_map[] = { "RIGHT", "LEFT", "DOWN", "UP", "BUTTON A", "BUTTON B", "BUTTON X", "BUTTON Y", "BUTTON L", "BUTTON R", "SELECT", "START", "KBD TOGGLE", "MENU", "    Stick 1: Tilt RIGHT", "    Stick 1: Tilt DOWN", "   Mouse emu X: Tilt RIGHT", "   Mouse emu Y: Tilt DOWN" };
@@ -264,8 +265,8 @@ static const uint32_t helptext_timeouts[] =
 	10000,
 	10000,
 	10000,
-	2000,
-	2000
+	10000,
+	10000
 };
 
 static const char *info_top = "\x80\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x81\x82";
@@ -625,6 +626,7 @@ static void printSysInfo()
 		struct battery_data_t bat;
 		int hasbat = getBattery(0, &bat);
 		int n = 2;
+		static int flip = 0;
 
 		char str[40];
 		OsdWrite(n++, info_top, 0, 0);
@@ -648,7 +650,8 @@ static void printSysInfo()
 		if (!j) infowrite(n++, "No network");
 		if (j<2) infowrite(n++, "");
 
-		if (hasbat)
+		flip = (flip + 1) & 3;
+		if (hasbat && (flip & 2))
 		{
 			infowrite(n++, "");
 
@@ -897,6 +900,8 @@ static int page = 0;
 
 void HandleUI(void)
 {
+	PROFILE_FUNCTION();
+
 	if (bt_timer >= 0)
 	{
 		if (!bt_timer) bt_timer = (int32_t)GetTimer(6000);
@@ -953,6 +958,7 @@ void HandleUI(void)
 	static char addon[1024];
 	static int store_name;
 	static int vfilter_type;
+	static int old_volume = 0;
 
 	static char	cp_MenuCancel;
 
@@ -1038,6 +1044,7 @@ void HandleUI(void)
 	{
 		static int menu_visible = 1;
 		static unsigned long timeout = 0;
+		static unsigned long off_timeout = 0;
 		if (!video_fb_state() && cfg.fb_terminal)
 		{
 			if (timeout && CheckTimer(timeout))
@@ -1053,7 +1060,14 @@ void HandleUI(void)
 				{
 					menu_visible--;
 					video_menu_bg(user_io_status_get("[3:1]"), 2);
+					off_timeout = cfg.video_off ? GetTimer(cfg.video_off * 1000) : 0;
 				}
+			}
+
+			if (off_timeout && CheckTimer(off_timeout) && menu_visible < 0)
+			{
+				off_timeout = 0;
+				video_menu_bg(user_io_status_get("[3:1]"), 3);
 			}
 
 			if (c || menustate != MENU_FILE_SELECT2)
@@ -1260,6 +1274,15 @@ void HandleUI(void)
 			       menu, select, up, down,
 			       left, right, plus, minus);
 
+	// Ensure we clear out the file-selector-visible file on select or cancel
+	if (cfg.log_file_entry)
+	{
+		if (menustate == fs_MenuSelect)
+			MakeFile("/tmp/FILESELECT", "selected");
+		else if (menustate == fs_MenuCancel)
+			MakeFile("/tmp/FILESELECT", "cancelled");
+	}
+
 	switch (menustate)
 	{
 	case MENU_NONE1:
@@ -1295,6 +1318,7 @@ void HandleUI(void)
 		if (menu || (is_menu() && !video_fb_state()) || (menustate == MENU_NONE2 && !mgl->done && mgl->state == 1))
 		{
 			OsdSetSize(16);
+			menusub = 0;
 			if(!is_menu() && (get_key_mod() & (LALT | RALT))) //Alt+Menu
 			{
 				SelectFile("", 0, SCANO_CORES, MENU_CORE_FILE_SELECTED1, MENU_NONE1);
@@ -1302,13 +1326,13 @@ void HandleUI(void)
 			else if (saved_menustate)
 			{
 				menustate = saved_menustate;
-				menusub = 0;
 			}
 			else if (is_st()) menustate = MENU_ST_MAIN1;
 			else if (is_archie()) menustate = MENU_ARCHIE_MAIN1;
 			else {
 				if (is_menu())
 				{
+					menusub = 6;
 					SelectFile("", 0, SCANO_CORES, MENU_CORE_FILE_SELECTED1, MENU_SYSTEM1);
 				}
 				else if (is_minimig())
@@ -1317,7 +1341,7 @@ void HandleUI(void)
 				}
 				else
 				{
-					if ((get_key_mod() & (LGUI | RGUI)) && !is_x86() && has_menu()) //Win+Menu
+					if ((get_key_mod() & (LGUI | RGUI)) && !is_x86() && !is_pcxt() && has_menu()) //Win+Menu
 					{
 						menustate = MENU_COMMON1;
 					}
@@ -1328,7 +1352,6 @@ void HandleUI(void)
 					}
 				}
 			}
-			menusub = 0;
 			OsdClear();
 			if (!mgl->done) OsdDisable();
 			else OsdEnable(DISABLE_KEYBOARD);
@@ -1673,6 +1696,32 @@ void HandleUI(void)
 								substrcpy(s + 1, p, 2);
 								strcat(s, " ");
 								strcat(s, x86_get_image_name(num));
+							}
+							else if (is_pcxt() && (p[0] == 'S') && x86_get_image_name(num))
+							{
+								strcpy(s, " ");
+								substrcpy(s + 1, p, 2);
+								strcat(s, " ");
+								strcat(s, x86_get_image_name(num));
+							}
+							else if (is_pcxt() && (p[0] == 'F'))
+							{
+								strcpy(s, " ");
+								substrcpy(s + 1, p, 2);
+								static char str[1024];
+								sprintf(str, "%s.f%c", user_io_get_core_name(), p[idx]);
+								if (FileLoadConfig(str, str, sizeof(str)) && str[0])
+								{
+									strcat(s, " ");
+									strcat(s, GetNameFromPath(str));
+								}
+								else
+								{
+									strcat(s, " *.");
+									pos = s + strlen(s);
+									substrcpy(pos, p, 1);
+									strcpy(pos, GetExt(pos));
+								}
 							}
 							else
 							{
@@ -2028,7 +2077,7 @@ void HandleUI(void)
 						}
 
 						ioctl_index = 0;
-						if ((p[idx] >= '0' && p[idx] <= '9') || is_x86()) ioctl_index = p[idx] - '0';
+						if ((p[idx] >= '0' && p[idx] <= '9') || is_x86() || is_pcxt()) ioctl_index = p[idx] - '0';
 						substrcpy(ext, p, 1);
 						while (strlen(ext) % 3) strcat(ext, " ");
 
@@ -2038,7 +2087,7 @@ void HandleUI(void)
 						strcpy(fs_pFileExt, ext);
 
 						memcpy(Selected_tmp, Selected_S[(int)ioctl_index], sizeof(Selected_tmp));
-						if (is_x86()) strcpy(Selected_tmp, x86_get_image_path(ioctl_index));
+						if (is_x86() || is_pcxt()) strcpy(Selected_tmp, x86_get_image_path(ioctl_index));
 						if (is_psx() && (ioctl_index == 2 || ioctl_index == 3)) fs_Options |= SCANO_SAVES;
 
 						if (is_pce() || is_megacd() || is_x86() || (is_psx() && !(fs_Options & SCANO_SAVES)))
@@ -2137,7 +2186,7 @@ void HandleUI(void)
 							if (user_io_status_bits(p + 1, &bit, 0, ex) == 1)
 							{
 								const char *opt = p + 1;
-								if (!bit && is_x86())
+								if (!bit && (is_x86() || is_pcxt()))
 								{
 									x86_init();
 									ResetUART();
@@ -2219,6 +2268,7 @@ void HandleUI(void)
 
 				if (fs_Options & SCANO_NEOGEO)
 				{
+					neocd_set_en(0);
 					neogeo_romset_tx(selPath);
 				}
 				else
@@ -2252,7 +2302,7 @@ void HandleUI(void)
 			}
 
 			menustate = MENU_GENERIC_MAIN1;
-			if (selPath[0] && !is_x86()) MenuHide();
+			if (selPath[0] && !is_x86() && !is_pcxt()) MenuHide();
 
 			printf("Image selected: %s\n", selPath);
 			memcpy(Selected_S[(int)ioctl_index], selPath, sizeof(Selected_S[(int)ioctl_index]));
@@ -2261,7 +2311,7 @@ void HandleUI(void)
 			char idx = user_io_ext_idx(selPath, fs_pFileExt) << 6 | ioctl_index;
 			if (addon[0] == 'f' && addon[1] != '1') process_addon(addon, idx);
 
-			if (is_x86())
+			else if (is_x86() || is_pcxt())
 			{
 				x86_set_image(ioctl_index, selPath);
 			}
@@ -2282,6 +2332,11 @@ void HandleUI(void)
 			else if (is_saturn())
 			{
 				saturn_set_image(ioctl_index, selPath);
+			}
+			else if (is_neogeo())
+			{
+				neocd_set_en(1);
+				neocd_set_image(selPath);
 			}
 			else
 			{
@@ -2509,17 +2564,17 @@ void HandleUI(void)
 				}
 				else
 				{
-					char *filename = user_io_create_config_name();
+					char *filename = user_io_create_config_name(1);
 					printf("Saving config to %s\n", filename);
 					user_io_status_save(filename);
-					if (is_x86()) x86_config_save();
+					if (is_x86() || is_pcxt()) x86_config_save();
 					if (is_arcade()) arcade_nvm_save();
 				}
 				break;
 
 			case 15:
 				FileCreatePath(DOCS_DIR);
-				snprintf(Selected_tmp, sizeof(Selected_tmp), DOCS_DIR"/%s",user_io_get_core_name());
+				snprintf(Selected_tmp, sizeof(Selected_tmp), DOCS_DIR "/%s",user_io_get_core_name());
 				FileCreatePath(Selected_tmp);
 				SelectFile(Selected_tmp, "PDFTXTMD ",  SCANO_DIR | SCANO_TXT  , MENU_DOC_FILE_SELECTED, MENU_COMMON1);
 				break;
@@ -2595,7 +2650,7 @@ void HandleUI(void)
 
 	case MENU_VIDEOPROC1:
 		helptext_idx = 0;
-		menumask = 0xFFF;
+		menumask = 0x1FFF;
 		OsdSetTitle("Video Processing");
 		menustate = MENU_VIDEOPROC2;
 		parentstate = MENU_VIDEOPROC1;
@@ -2659,7 +2714,10 @@ void HandleUI(void)
 			MenuWrite(n++, s, menusub == 10, (video_get_shadow_mask_mode() <= 0) || !S_ISDIR(getFileType(SMASK_DIR)));
 
 			MenuWrite(n++);
-			MenuWrite(n++, STD_BACK, menusub == 11);
+			MenuWrite(n++, " Reset to Defaults", menusub == 11);
+
+			MenuWrite(n++);
+			MenuWrite(n++, STD_BACK, menusub == 12);
 
 			if (!adjvisible) break;
 			firstmenu += adjvisible;
@@ -2796,6 +2854,11 @@ void HandleUI(void)
 				break;
 
 			case 11:
+				video_cfg_reset();
+				menustate = parentstate;
+				break;
+
+			case 12:
 				menusub = 5;
 				menustate = MENU_COMMON1;
 				break;
@@ -3373,7 +3436,7 @@ void HandleUI(void)
 	case MENU_PRESET_FILE_SELECTED:
 		memcpy(Selected_F[15], selPath, sizeof(Selected_F[15]));
 		recent_update(SelectedDir, selPath, SelectedLabel, 15);
-		video_loadPreset(selPath);
+		video_loadPreset(selPath, true);
 		menustate = MENU_VIDEOPROC1;
 		break;
 
@@ -3408,7 +3471,7 @@ void HandleUI(void)
 			if (m) strcat(s, "\xc ");
 			m = (i == (flag >> 4) && en);
 			if (!en) strcat(s, "\xb");
-			strcat(s, (!i) ? "Main" : (i == 1) ? "Alt1" : (i == 2) ? "Alt2" : "Alt3");
+			strcat(s, cfg_get_label(i));
 			if (!en) strcat(s, "\xb");
 		}
 		strcat(s, " ");
@@ -3426,9 +3489,9 @@ void HandleUI(void)
 		}
 		OsdWrite(12, s, menusub == 1);
 
-		m = get_volume();
+		old_volume = get_volume();
 		strcpy(s, "   Global Volume: ");
-		if (m & 0x10)
+		if (old_volume & 0x10)
 		{
 			strcat(s, "< Mute >");
 		}
@@ -3438,7 +3501,7 @@ void HandleUI(void)
 			char *bar = s + strlen(s);
 			int vol = (audio_filter_en() < 0) ? get_core_volume() : 0;
 			memset(bar, 0x8C, 8 - vol);
-			memset(bar, 0x7f, 8 - vol - m);
+			memset(bar, 0x7f, 8 - vol - old_volume);
 		}
 		OsdWrite(13, s, menusub == 2);
 
@@ -3518,6 +3581,13 @@ void HandleUI(void)
 				menustate = sharpmz_default_ui_state();
 				break;
 			}
+		}
+
+		m = get_volume();
+		if (old_volume != m)
+		{
+			old_volume = m;
+			menustate = MENU_MISC1;
 		}
 		break;
 
@@ -3892,12 +3962,11 @@ void HandleUI(void)
 
 	case MENU_ST_MAIN1:
 		OsdSetSize(16);
-		menumask = 0x77f;
+		menumask = 0xeff;
 		OsdSetTitle("AtariST", 0);
 		firstmenu = 0;
 		m = 0;
 
-		OsdWrite(m++);
 		for (uint32_t i = 0; i < 2; i++)
 		{
 			snprintf(s, 29, " %c: %s%s", 'A' + i, (tos_system_ctrl() & (TOS_CONTROL_FDC_WR_PROT_A << i)) ? "\x17" : "", tos_get_disk_name(i));
@@ -3908,27 +3977,30 @@ void HandleUI(void)
 		OsdWrite(m++, s, menusub == 2, 0);
 		OsdWrite(m++);
 
+		snprintf(s, 29, " Cart: %s", tos_get_cartridge_name());
+		MenuWrite(m++, s, menusub == 3, !!(tos_system_ctrl() & TOS_CONTROL_DONGLE));
+		MenuWrite(m++);
+
 		snprintf(s, 29, " Joysticks swap: %s", user_io_get_joyswap() ? "Yes" : "No");
-		OsdWrite(m++, s, menusub == 3);
+		OsdWrite(m++, s, menusub == 4);
 		OsdWrite(m++);
 
-		OsdWrite(m++, " Modify config             \x16", menusub == 4);
-		OsdWrite(m++, " Load config               \x16", menusub == 5);
-		OsdWrite(m++, " Save config               \x16", menusub == 6);
-		OsdWrite(m++);
+		OsdWrite(m++, " Modify config             \x16", menusub == 5);
+		OsdWrite(m++, " Load config               \x16", menusub == 6);
+		OsdWrite(m++, " Save config               \x16", menusub == 7);
 
 		if (spi_uio_cmd16(UIO_GET_OSDMASK, 0) & 1)
 		{
-			menumask |= 0x80;
-			OsdWrite(m++, " MT32-pi                   \x16", menusub == 7);
-			OsdWrite(m++);
+			menumask |= 0x100;
+			OsdWrite(m++, " MT32-pi                   \x16", menusub == 8);
 		}
 
-		OsdWrite(m++, " Reset", menusub == 8);
-		OsdWrite(m++, " Cold Boot", menusub == 9);
+		OsdWrite(m++);
+		OsdWrite(m++, " Reset", menusub == 9);
+		OsdWrite(m++, " Cold Boot", menusub == 10);
 
 		for (; m < OsdGetSize()-1; m++) OsdWrite(m);
-		OsdWrite(15, STD_EXIT, menusub == 10, 0, OSD_ARROW_RIGHT | OSD_ARROW_LEFT);
+		OsdWrite(15, STD_EXIT, menusub == 11, 0, OSD_ARROW_RIGHT | OSD_ARROW_LEFT);
 
 		menustate = MENU_ST_MAIN2;
 		parentstate = MENU_ST_MAIN1;
@@ -3979,6 +4051,26 @@ void HandleUI(void)
 				break;
 
 			case 3:
+				if (!(tos_system_ctrl() & TOS_CONTROL_DONGLE))
+				{
+					if (tos_cartridge_is_inserted())
+					{
+						tos_load_cartridge("");
+						menustate = MENU_ST_MAIN1;
+					}
+					else
+					{
+						fs_Options = SCANO_DIR;
+						fs_MenuSelect = MENU_ST_SYSTEM_FILE_SELECTED;
+						fs_MenuCancel = MENU_ST_MAIN1;
+						strcpy(fs_pFileExt, "STC");
+						if (select) SelectFile(Selected_F[menusub], fs_pFileExt, fs_Options, fs_MenuSelect, fs_MenuCancel);
+						else if (recent_init(menusub)) menustate = MENU_RECENT1;
+					}
+				}
+				break;
+
+			case 4:
 				if (select)
 				{
 					user_io_set_joyswap(!user_io_get_joyswap());
@@ -3986,7 +4078,7 @@ void HandleUI(void)
 				}
 				break;
 
-			case 4:  // System submenu
+			case 5:  // System submenu
 				if (select)
 				{
 					menustate = MENU_ST_SYSTEM1;
@@ -3995,7 +4087,7 @@ void HandleUI(void)
 				}
 				break;
 
-			case 5:  // Load config
+			case 6:  // Load config
 				if (select)
 				{
 					menustate = MENU_ST_LOAD_CONFIG1;
@@ -4003,7 +4095,7 @@ void HandleUI(void)
 				}
 				break;
 
-			case 6:  // Save config
+			case 7:  // Save config
 				if (select)
 				{
 					menustate = MENU_ST_SAVE_CONFIG1;
@@ -4011,7 +4103,7 @@ void HandleUI(void)
 				}
 				break;
 
-			case 7:
+			case 8:
 				if (select)
 				{
 					menustate = MENU_MT32PI_MAIN1;
@@ -4019,7 +4111,7 @@ void HandleUI(void)
 				}
 				break;
 
-			case 8:  // Reset
+			case 9:  // Reset
 				if (select)
 				{
 					tos_reset(0);
@@ -4027,7 +4119,7 @@ void HandleUI(void)
 				}
 				break;
 
-			case 9:  // Cold Boot
+			case 10:  // Cold Boot
 				if (select)
 				{
 					tos_insert_disk(0, "");
@@ -4037,7 +4129,7 @@ void HandleUI(void)
 				}
 				break;
 
-			case 10:  // Exit
+			case 11:  // Exit
 				if (select)
 				{
 					menustate = MENU_NONE1;
@@ -4055,7 +4147,7 @@ void HandleUI(void)
 		break;
 
 	case MENU_ST_SYSTEM1:
-		menumask = 0x1ffff;
+		menumask = 0x1fffb;
 		OsdSetTitle("Config", 0);
 		helptext_idx = 0;
 
@@ -4070,10 +4162,6 @@ void HandleUI(void)
 				snprintf(s, 29, " HDD%d: %s", i, tos_get_disk_name(2 + i));
 				MenuWrite(m++, s, menusub == i);
 			}
-			MenuWrite(m++);
-
-			snprintf(s, 29, " Cart: %s", tos_get_cartridge_name());
-			MenuWrite(m++, s, menusub == 2);
 			MenuWrite(m++);
 
 			strcpy(s, " Memory:     ");
@@ -4160,7 +4248,7 @@ void HandleUI(void)
 		else if (back || left)
 		{
 			menustate = MENU_ST_MAIN1;
-			menusub = 4;
+			menusub = 5;
 			if (need_reset)
 			{
 				tos_reset(1);
@@ -4178,24 +4266,6 @@ void HandleUI(void)
 				if (select) SelectFile(Selected_S[menusub], "VHD", fs_Options, fs_MenuSelect, fs_MenuCancel);
 				else if (recent_init(menusub + 500)) menustate = MENU_RECENT1;
 			}
-			else
-			{
-				if (tos_cartridge_is_inserted())
-				{
-					tos_load_cartridge("");
-					menustate = MENU_ST_SYSTEM1;
-				}
-				else
-				{
-					fs_Options = SCANO_DIR;
-					fs_MenuSelect = MENU_ST_SYSTEM_FILE_SELECTED;
-					fs_MenuCancel = MENU_ST_SYSTEM1;
-					strcpy(fs_pFileExt, "IMG");
-					if (select) SelectFile(Selected_F[menusub], "IMG", fs_Options, fs_MenuSelect, fs_MenuCancel);
-					else if (recent_init(menusub)) menustate = MENU_RECENT1;
-				}
-			}
-
 		}
 		else if (select || plus || minus)
 		{
@@ -4311,7 +4381,7 @@ void HandleUI(void)
 
 			case 16:
 				menustate = MENU_ST_MAIN1;
-				menusub = 4;
+				menusub = 5;
 				if (need_reset)
 				{
 					tos_reset(1);
@@ -4338,12 +4408,12 @@ void HandleUI(void)
 			menustate = MENU_ST_SYSTEM1;
 		}
 
-		if (menusub == 2)
+		if (menusub == 3)
 		{
 			memcpy(Selected_F[menusub], selPath, sizeof(Selected_F[menusub]));
 			recent_update(SelectedDir, selPath, SelectedLabel, menusub);
 			tos_load_cartridge(selPath);
-			menustate = MENU_ST_SYSTEM1;
+			menustate = MENU_ST_MAIN1;
 		}
 		break;
 
@@ -4382,7 +4452,7 @@ void HandleUI(void)
 		if (menu || left)
 		{
 			menustate = MENU_ST_MAIN1;
-			menusub = 5;
+			menusub = 6;
 		}
 
 		if (select)
@@ -4396,7 +4466,7 @@ void HandleUI(void)
 			else
 			{
 				menustate = MENU_ST_MAIN1;
-				menusub = 5;
+				menusub = 6;
 			}
 		}
 		break;
@@ -4432,7 +4502,7 @@ void HandleUI(void)
 		if (menu || left)
 		{
 			menustate = MENU_ST_MAIN1;
-			menusub = 6;
+			menusub = 7;
 		}
 
 		if (select)
@@ -4445,7 +4515,7 @@ void HandleUI(void)
 			else
 			{
 				menustate = MENU_ST_MAIN1;
-				menusub = 6;
+				menusub = 7;
 			}
 		}
 		break;
@@ -4572,7 +4642,7 @@ void HandleUI(void)
 			else
 			{
 				menustate = MENU_ST_MAIN1;
-				menusub = 7;
+				menusub = 8;
 			}
 		}
 		else if (select || plus || minus)
@@ -4649,15 +4719,12 @@ void HandleUI(void)
 		OsdSetTitle((fs_Options & SCANO_CORES) ? "Cores" : "Select", 0);
 		PrintDirectory(hold_cnt<2);
 		menustate = MENU_FILE_SELECT2;
-		if (cfg.log_file_entry)
+		if (cfg.log_file_entry && flist_nDirEntries())
 		{
 			//Write out paths infos for external integration
-			FILE* filePtr = fopen("/tmp/CURRENTPATH", "w");
-			FILE* pathPtr = fopen("/tmp/FULLPATH", "w");
-			fprintf(filePtr, "%s", flist_SelectedItem()->altname);
-			fprintf(pathPtr, "%s", selPath);
-			fclose(filePtr);
-			fclose(pathPtr);
+			MakeFile("/tmp/CURRENTPATH", flist_SelectedItem()->altname);
+			MakeFile("/tmp/FULLPATH", selPath);
+			MakeFile("/tmp/FILESELECT", "active");
 		}
 		break;
 
@@ -4724,7 +4791,7 @@ void HandleUI(void)
 
 		if (flist_nDirEntries())
 		{
-			ScrollLongName(); // scrolls file name if longer than display line
+			if (!helpstate || ((flist_iSelectedEntry() - flist_iFirstEntry() + 1) < OsdGetSize())) ScrollLongName(); // scrolls file name if longer than display line
 
 			if (c == KEY_HOME || c == KEY_TAB)
 			{
@@ -5075,7 +5142,7 @@ void HandleUI(void)
 			else
 			{
 				user_io_status_reset();
-				char *filename = user_io_create_config_name();
+				char *filename = user_io_create_config_name(1);
 				printf("Saving config to %s\n", filename);
 				user_io_status_save(filename);
 				menustate = MENU_GENERIC_MAIN1;
@@ -5506,8 +5573,8 @@ void HandleUI(void)
 		OsdWrite(m++, s, menusub == 5, 0);
 
 		OsdWrite(m++, "", 0, 0);
-		strcpy(s, " CD32 Pad : ");
-		strcat(s, config_cd32pad_msg[(minimig_config.autofire >> 2) & 1]);
+		strcpy(s, " Joystick : ");
+		strcat(s, config_joystick_mode[(minimig_config.autofire & 6) >> 1]);
 		OsdWrite(m++, s, menusub == 6, 0);
 
 		OsdWrite(m++, "", 0, 0);
@@ -5634,14 +5701,26 @@ void HandleUI(void)
 			}
 			else if (menusub == 6)
 			{
-				minimig_config.autofire ^= 0x4;
+				uint8_t x = (minimig_config.autofire & 6) >> 1;
+				if (minus)
+				{
+					x = (x - 1) & 3;
+					if (x == 3) x = 2;
+				}
+				else
+				{
+					x = (x + 1) & 3;
+					if (x == 3) x = 0;
+				}
+
+				minimig_config.autofire = (minimig_config.autofire & ~6) | (x << 1);
 				menustate = MENU_MINIMIG_CHIPSET1;
-				minimig_ConfigAutofire(minimig_config.autofire, 0x4);
+				minimig_ConfigAutofire(minimig_config.autofire, 6);
 			}
 			else if (menusub == 7 && select)
 			{
 				ioctl_index = 1;
-				SelectFile(Selected_F[4], "ROM", 0, MENU_MINIMIG_ROMFILE_SELECTED, MENU_MINIMIG_CHIPSET1);
+				SelectFile(Selected_F[4], "ROM", SCANO_DIR, MENU_MINIMIG_ROMFILE_SELECTED, MENU_MINIMIG_CHIPSET1);
 			}
 			else if (menusub == 8)
 			{
@@ -6673,15 +6752,20 @@ void ScrollLongName(void)
 	// this function is called periodically when file selection window is displayed
 	// it checks if predefined period of time has elapsed and scrolls the name if necessary
 
-	static int len;
+	int off = 0;
 	int max_len;
 
-	len = strlen(flist_SelectedItem()->altname); // get name length
+	int len = strlen(flist_SelectedItem()->altname); // get name length
 
 	max_len = 30; // number of file name characters to display (one more required for scrolling)
 	if (flist_SelectedItem()->de.d_type == DT_DIR)
 	{
 		max_len = 23; // number of directory name characters to display
+		if ((fs_Options & SCANO_CORES) && (flist_SelectedItem()->altname[0] == '_'))
+		{
+			off = 1;
+			len--;
+		}
 	}
 
 	if (flist_SelectedItem()->de.d_type != DT_DIR) // if a file
@@ -6696,7 +6780,7 @@ void ScrollLongName(void)
 		}
 	}
 
-	ScrollText(flist_iSelectedEntry()-flist_iFirstEntry(), flist_SelectedItem()->altname, 0, len, max_len, 1);
+	ScrollText(flist_iSelectedEntry() - flist_iFirstEntry(), flist_SelectedItem()->altname + off, 0, len, max_len, 1);
 }
 
 // print directory contents
