@@ -9,6 +9,9 @@
 #include "user_io.h"
 #include "menu.h"
 
+#define MAX_PLUGINS 8
+#define PLUGIN_API_VERSION 1
+
 // Firmware API for Plugins
 
 void firm_api_scheduler_yield() {
@@ -54,7 +57,7 @@ void firm_api_MakeFile(const char *filename, const char *data) {
 }
 
 struct FirmwareAPI {
-    int version = 1;
+    int version = PLUGIN_API_VERSION;
     void (*scheduler_yield)() = firm_api_scheduler_yield;
     void (*OsdSetTitle)(const char *s, int a) = firm_api_OsdSetTitle;
     void (*OsdClear)() = firm_api_OsdClear;
@@ -68,14 +71,11 @@ struct FirmwareAPI {
 };
 
 struct HookPair {
-	int id;
-	void* ptr;
+    int id;
+    void* ptr;
 };
 
 // Internals
-
-#define PLUGIN_API_VERSION 1
-#define MAX_PLUGINS 8
 
 struct PluginHookData {
     const char* name;
@@ -123,9 +123,9 @@ void load_hook(HookPair hook) {
 }
 
 void load_single_plugin(const char* path) {
-	void *plugin = dlopen(path, RTLD_LAZY | RTLD_GLOBAL);
-	if (!plugin) {
-		fprintf(stderr, "Failed to load plugin: %s\n", dlerror());
+    void *plugin = dlopen(path, RTLD_LAZY | RTLD_GLOBAL);
+    if (!plugin) {
+        fprintf(stderr, "Failed to load plugin: %s\n", dlerror());
         return;
     }
 
@@ -138,14 +138,14 @@ void load_single_plugin(const char* path) {
     int hooks_count = 0;
     auto api = FirmwareAPI{};
     HookPair* hooks = describe_hooks(&api, &hooks_count);
-    if (hooks == nullptr || hooks_count <= 0) {
+    if (hooks == nullptr || hooks_count <= 0 || hooks_count > MAX_PLUGIN_HOOKS) {
         fprintf(stderr, "Plugin %s| describe_hooks() did not return a valid hooks array: %d\n", path, hooks_count);
         return;
     }
     int loaded = 0;
     for (int i = 0; i < hooks_count; i++) {
         if (hooks[i].id < 0 || hooks[i].id >= MAX_PLUGIN_HOOKS) {
-            fprintf(stderr, "Plugin %s| Hooks array entry '%d' did contain incorrect value: %d\n", path, i, hooks[i]);
+            fprintf(stderr, "Plugin %s| Hooks array entry '%d' did contain incorrect value: %d\n", path, i, hooks[i].id);
             continue;
         }
         load_hook(hooks[i]);
