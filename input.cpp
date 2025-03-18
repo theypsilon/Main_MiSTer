@@ -32,6 +32,7 @@
 #include "profiling.h"
 #include "gamecontroller_db.h"
 #include "str_util.h"
+#include "plugin.h"
 
 #define NUMDEV 30
 #define NUMPLAYERS 6
@@ -5741,6 +5742,8 @@ int input_test(int getchar)
 						if (!strcmp(cmd + 7, "mute")) set_volume(0x81);
 						else if (!strcmp(cmd + 7, "unmute")) set_volume(0x80);
 						else if (cmd[7] >= '0' && cmd[7] <= '7') set_volume(0x40 - 0x30 + cmd[7]);
+					} else {
+						plugin_handle_mister_cmd(cmd);
 					}
 				}
 			}
