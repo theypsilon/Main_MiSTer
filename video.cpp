@@ -28,6 +28,7 @@
 #include "offload.h"
 
 #include "support.h"
+#include "support/arcade/mra_loader.h"
 #include "lib/imlib2/Imlib2.h"
 #include "lib/md5/md5.h"
 
@@ -59,6 +60,7 @@
 #define VRR_VESA     0x02
 
 static int     use_vrr = 0;
+static int     use_freesync_spd = 0;
 static uint8_t vrr_min_fr = 0;
 static uint8_t vrr_max_fr = 0;
 
@@ -73,11 +75,11 @@ static int brd_y = 0;
 static int menu_bg = 0;
 static int menu_bgn = 0;
 
-static VideoInfo current_video_info;
+VideoInfo current_video_info;
 
 static int support_FHD = 0;
 
-yc_mode yc_modes[10];
+yc_mode yc_modes[20];
 
 struct vrr_cap_t
 {
@@ -305,7 +307,7 @@ struct ScalerFilter
 	char filename[1023];
 };
 
-static ScalerFilter scaler_flt[3];
+static ScalerFilter scaler_flt[4];
 
 struct FilterPhase
 {
@@ -331,7 +333,7 @@ struct VideoFilter
 	VideoFilterDigest digest;
 };
 
-static VideoFilter scaler_flt_data[3];
+static VideoFilter scaler_flt_data[4];
 
 static bool scale_phases(FilterPhase out_phases[N_PHASES], FilterPhase *in_phases, int in_count)
 {
@@ -534,6 +536,7 @@ static void set_vfilter(int force)
 {
 	PROFILE_FUNCTION();
 
+
 	static int last_flags = 0;
 
 	int flt_flags = spi_uio_cmd_cont(UIO_SET_FLTNUM);
@@ -550,7 +553,7 @@ static void set_vfilter(int force)
 	DisableIO();
 
 	int vert_flt;
-	if (current_video_info.interlaced) vert_flt = VFILTER_HORZ;
+	if (current_video_info.interlaced) vert_flt = scaler_flt[VFILTER_ILACE].mode ? VFILTER_ILACE : VFILTER_HORZ;
 	else if ((flt_flags & 0x30) && scaler_flt[VFILTER_SCAN].mode) vert_flt = VFILTER_SCAN;
 	else if (scaler_flt[VFILTER_VERT].mode) vert_flt = VFILTER_VERT;
 	else vert_flt = VFILTER_HORZ;
@@ -661,11 +664,18 @@ static void loadScalerCfg()
 			strcpy(scaler_flt[VFILTER_SCAN].filename, cfg.vfilter_scanlines_default);
 			scaler_flt[VFILTER_SCAN].mode = 1;
 		}
+
+		if (cfg.vfilter_interlace_default[0])
+		{
+			strcpy(scaler_flt[VFILTER_ILACE].filename, cfg.vfilter_interlace_default);
+			scaler_flt[VFILTER_ILACE].mode = 1;
+		}
 	}
 
 	if (!read_video_filter(VFILTER_HORZ, &scaler_flt_data[VFILTER_HORZ])) memset(&scaler_flt[VFILTER_HORZ], 0, sizeof(scaler_flt[VFILTER_HORZ]));
 	if (!read_video_filter(VFILTER_VERT, &scaler_flt_data[VFILTER_VERT])) memset(&scaler_flt[VFILTER_VERT], 0, sizeof(scaler_flt[VFILTER_VERT]));
 	if (!read_video_filter(VFILTER_SCAN, &scaler_flt_data[VFILTER_SCAN])) memset(&scaler_flt[VFILTER_SCAN], 0, sizeof(scaler_flt[VFILTER_SCAN]));
+	if (!read_video_filter(VFILTER_ILACE, &scaler_flt_data[VFILTER_ILACE])) memset(&scaler_flt[VFILTER_ILACE], 0, sizeof(scaler_flt[VFILTER_ILACE]));
 }
 
 static char active_gamma_cfg[1024] = { 0 };
@@ -1047,6 +1057,11 @@ void video_loadPreset(char *name, bool save)
 				load_flt_pres(line + 8, VFILTER_SCAN);
 				scaler_dirty = true;
 			}
+			else if (!strncasecmp(line, "ifilter=", 8))
+			{
+				load_flt_pres(line + 8, VFILTER_ILACE);
+				scaler_dirty = true;
+			}
 			else if (!strncasecmp(line, "mask=", 5))
 			{
 				mask_dirty = true;
@@ -1095,30 +1110,13 @@ void video_loadPreset(char *name, bool save)
 	}
 }
 
-static void hdmi_config_set_spd(bool val)
+static void hdmi_packet_enable(uint8_t mask, bool enable)
 {
 	int fd = i2c_open(0x39, 0);
 	if (fd >= 0)
 	{
 		uint8_t packet_val = i2c_smbus_read_byte_data(fd, 0x40);
-		if (val)
-			packet_val |= 0x40;
-		else
-			packet_val &= ~0x40;
-		int res = i2c_smbus_write_byte_data(fd, 0x40, packet_val);
-		if (res < 0) printf("i2c: write error (%02X %02X): %d\n", 0x40, packet_val, res);
-		i2c_close(fd);
-	}
-}
-
-static void hdmi_config_set_spare(int packet, bool enabled)
-{
-	int fd = i2c_open(0x39, 0);
-	uint8_t mask = packet == 0 ? 0x01 : 0x02;
-	if (fd >= 0)
-	{
-		uint8_t packet_val = i2c_smbus_read_byte_data(fd, 0x40);
-		if (enabled)
+		if (enable)
 			packet_val |= mask;
 		else
 			packet_val &= ~mask;
@@ -1127,6 +1125,48 @@ static void hdmi_config_set_spare(int packet, bool enabled)
 		i2c_close(fd);
 	}
 }
+
+static void hdmi_packet_set_data(uint8_t mask, uint8_t offset, uint8_t *data, int size)
+{
+	if (!data)
+	{
+		hdmi_packet_enable(mask, 0);
+		return;
+	}
+
+	int fd = i2c_open(0x38, 0);
+	if (fd >= 0)
+	{
+		int res;
+		hdmi_packet_enable(mask, 1);
+
+		res = i2c_smbus_write_byte_data(fd, offset + 0x1F, 0x80);
+		if (res < 0)
+		{
+			printf("i2c: Couldn't update packet change register (0x%02X, 0x80) %d\n", offset + 0x1F, res);
+		}
+		else
+		{
+			for (int i = 0; i < size; i++)
+			{
+				res = i2c_smbus_write_byte_data(fd, offset + i, data[i]);
+				if (res < 0) printf("i2c: SPD register write error (%02X %02x): %d\n", offset + i, data[i], res);
+			}
+
+			res = i2c_smbus_write_byte_data(fd, offset + 0x1F, 0x00);
+			if (res < 0) printf("i2c: Couldn't update packet change register (0x%02X, 0x00) %d\n", offset + 0x1F, res);
+		}
+		i2c_close(fd);
+	}
+	else
+	{
+		hdmi_packet_enable(mask, 0);
+	}
+}
+
+#define hdmi_spd_config(data) hdmi_packet_set_data(0x40, 0x00, data, sizeof(data))
+
+#define hdmi_spare_config(packet, data) hdmi_packet_set_data(packet == 0 ? 0x01 : 0x02, packet == 0 ? 0xC0 : 0xE0, data, sizeof(data))
 
 static void hdmi_config_set_csc()
 {
@@ -1165,7 +1205,7 @@ static void hdmi_config_set_csc()
 
 	const float pi = float(M_PI);
 
-	int ypbpr = (cfg.vga_mode_int == 1) && cfg.direct_video;
+	int ypbpr = (cfg.vga_mode_int == 1) && (cfg.direct_video == 1);
 
 	// out-of-scope defines, not used with ypbpr
 	int16_t csc_int16[12];
@@ -1364,7 +1404,7 @@ static void hdmi_config_set_csc()
 
 static void hdmi_config_init()
 {
-	int ypbpr = (cfg.vga_mode_int == 1) && cfg.direct_video;
+	int ypbpr = (cfg.vga_mode_int == 1) && (cfg.direct_video == 1);
 
 	// address, value
 	uint8_t init_data[] = {
@@ -1403,15 +1443,16 @@ static void hdmi_config_init()
 
 		0x17, 0b01100010,		// Aspect ratio 16:9 [1]=1, 4:3 [1]=0, invert sync polarity
 
-		0x3B, 0x0,              // Automatic pixel repetition and VIC detection
-
+		0x3B, 0x80,             // Automatic pixel repetition and VIC detection
+		0x3C, 0x00,
 
 		0x48, 0b00001000,       // [6]=0 Normal bus order!
 								// [5] DDR Alignment.
 								// [4:3] b01 Data right justified (for YCbCr 422 input modes).
 
 		0x49, 0xA8,				// ADI required Write.
-		0x4A, 0b10000000, //Auto-Calculate SPD checksum
+		0x40, 0x00,
+		0x4A, 0b10000000,		//Auto-Calculate SPD checksum
 		0x4C, 0x00,				// ADI required Write.
 
 		0x55, (uint8_t)(cfg.hdmi_game_mode ? 0b00010010 : 0b00010000),
@@ -1571,38 +1612,17 @@ static void hdmi_config_set_hdr()
 	};
 
 	// now we calculate the checksum for this packet (2s complement sum)
-	uint16_t checksum = 0;
-	for (uint i = 0; i < sizeof(hdr_data); i++)
-		checksum += hdr_data[i];
-
-	checksum = checksum & 0xFF;
-	checksum = ~checksum + 1;
-
-	hdr_data[3] = checksum;
+	uint8_t checksum = 0;
+	for (uint i = 0; i < sizeof(hdr_data); i++) checksum += hdr_data[i];
+	hdr_data[3] = ~checksum + 1;
 
 	if (cfg.hdr == 0)
 	{
-		hdmi_config_set_spare(1, false);
+		hdmi_spare_config(1, 0);
 	}
 	else
 	{
-		hdmi_config_set_spare(1, true);
-		int fd = i2c_open(0x38, 0);
-		int res = i2c_smbus_write_byte_data(fd, 0xFF, 0b10000000);
-		if (res < 0)
-		{
-			printf("i2c: hdr: Couldn't update Spare Packet change register (0xDF, 0x80) %d\n", res);
-		}
-
-		uint8_t addr = 0xe0;
-		for (uint i = 0; i < sizeof(hdr_data); i++)
-		{
-			res = i2c_smbus_write_byte_data(fd, addr, hdr_data[i]);
-			if (res < 0) printf("i2c: hdr register write error (%02X %02x): %d\n", addr, hdr_data[i], res);
-			addr += 1;
-		}
-		res = i2c_smbus_write_byte_data(fd, 0xfF, 0x00);
-		if (res < 0) printf("i2c: hdr: Couldn't update Spare Packet change register (0xDF, 0x00), %d\n", res);
+		hdmi_spare_config(1, hdr_data);
 	}
 }
 
@@ -1933,10 +1953,11 @@ static void set_vrr_mode()
 	{
 		if (last_vrr_mode != 0)
 		{
-			hdmi_config_set_spd(false);
-			hdmi_config_set_spare(0, false);
+			hdmi_spd_config(0);
+			hdmi_spare_config(0, 0);
 		}
 		last_vrr_mode = 0;
+		use_freesync_spd = 0;
 		return;
 	}
 
@@ -2009,89 +2030,44 @@ static void set_vrr_mode()
 
 	int16_t vrateh_i = (int16_t)vrateh;
 
-	//These are only sent in the case that freesync or vesa vrr is enabled
-	uint8_t freesync_data[] = {
-		//header
-		0x00, 0x83,
-		0x01, 0x01,
-		0x02, 0x08,
-		//data
-		0x04, 0x1A,
-		0x05, 0x00,
-		0x06, 0x00,
-		//0x07
-		//0x08
-		0x09, 0x07,
-		0x0A, vrr_min_fr,
-		0x0B, vrr_max_fr,
-	};
-
-	uint8_t vesa_data[] = {
-		0xC0, 0x7F,
-		0xC1, 0xC0,
-		0xC2, 0x00,
-
-		0xC3, 0x40,
-		0xC5, 0x01,
-		0xC6, 0x00,
-		0xC7, 0x01,
-		0xC8, 0x00,
-		0xC9, 0x04,
-
-		0xCA, 0x01,
-		0xCB, (uint8_t)v_cur.param.vfp,
-		0xCC, (uint8_t)((vrateh_i >> 8) & 0x03),
-		0xCD, (uint8_t)(vrateh_i & 0xFF),
-	};
-
-	int res = 0;
-	int fd = i2c_open(0x38, 0);
-	if (fd >= 0)
+	if (use_vrr == VRR_FREESYNC)
 	{
-		if (use_vrr == VRR_FREESYNC)
-		{
-			hdmi_config_set_spd(1);
-			res = i2c_smbus_write_byte_data(fd, 0x1F, 0b10000000);
-			if (res < 0)
-			{
-				printf("i2c: Vrr: Couldn't update SPD change register (0x1F, 0x80) %d\n", res);
-			}
-			for (uint i = 0; i < sizeof(freesync_data); i += 2)
-			{
-				res = i2c_smbus_write_byte_data(fd, freesync_data[i], freesync_data[i + 1]);
-				if (res < 0) printf("i2c: Vrr register write error (%02X %02x): %d\n", freesync_data[i], freesync_data[i + 1], res);
-			}
-			res = i2c_smbus_write_byte_data(fd, 0x1F, 0x00);
-			if (res < 0) printf("i2c: Vrr: Couldn't update SPD change register (0x1F, 0x00), %d\n", res);
-		}
-		else
-		{
-			hdmi_config_set_spd(0);
-		}
+		uint8_t freesync_data[] = {
+			//header
+			0x83, 0x01, 0x08, 0x00,
+			//data
+			0x1A, 0x00, 0x00, 0x00, 0x00, 0x07,
+			vrr_min_fr,
+			vrr_max_fr,
+		};
 
-		if (use_vrr == VRR_VESA)
-		{
-			hdmi_config_set_spare(0, true);
-			res = i2c_smbus_write_byte_data(fd, 0xDF, 0b10000000);
-			if (res < 0)
-			{
-				printf("i2c: Vrr: Couldn't update Spare Packet change register (0xDF, 0x80) %d\n", res);
-			}
-
-			for (uint i = 0; i < sizeof(vesa_data); i += 2)
-			{
-				res = i2c_smbus_write_byte_data(fd, vesa_data[i], vesa_data[i + 1]);
-				if (res < 0) printf("i2c: Vrr register write error (%02X %02x): %d\n", vesa_data[i], vesa_data[i + 1], res);
-			}
-			res = i2c_smbus_write_byte_data(fd, 0xDF, 0x00);
-			if (res < 0) printf("i2c: Vrr: Couldn't update Spare Packet change register (0xDF, 0x00), %d\n", res);
-		}
-		else
-		{
-			hdmi_config_set_spare(0, false);
-		}
-		i2c_close(fd);
+		use_freesync_spd = 1;
+		hdmi_spd_config(freesync_data);
 	}
+	else if(use_freesync_spd)
+	{
+		use_freesync_spd = 0;
+		hdmi_spd_config(0);
+	}
+
+	if (use_vrr == VRR_VESA)
+	{
+		uint8_t vesa_data[] = {
+			0x7F, 0xC0, 0x00,
+			0x40, 0x00, 0x01, 0x00, 0x01, 0x00, 0x04,
+			0x01,
+			(uint8_t)v_cur.param.vfp,
+			(uint8_t)((vrateh_i >> 8) & 0x03),
+			(uint8_t)(vrateh_i & 0xFF),
+		};
+
+		hdmi_spare_config(0, vesa_data);
+	}
+	else
+	{
+		hdmi_spare_config(0, 0);
+	}
+
 	last_vrr_mode = cfg.vrr_mode;
 	last_vrr_rate = vrateh;
 	last_vrr_vfp = v_cur.param.vfp;
@@ -2325,8 +2301,186 @@ static void fb_init()
 	spi_uio_cmd16(UIO_SET_FBUF, 0);
 }
 
+// Structure to hold DAC configuration
+struct dac_config {
+	uint16_t mfg_id;
+	uint8_t hdmi_limited;
+	uint8_t hdmi_audio_96k;
+	int8_t composite_sync; // -1=use MiSTer.ini, 0=force off, 1=force on
+	char name[64];
+};
+
+static dac_config dac_configs[32];
+static int dac_config_count = 0;
+
+static void load_dac_file(const char *filename)
+{
+	fileTextReader reader;
+	const char *line;
+
+	if (!FileOpenTextReader(&reader, filename)) {
+		return;
+	}
+
+	printf("Loading DAC configuration from %s\n", filename);
+
+	while ((line = FileReadLine(&reader)) && dac_config_count < 32) {
+		// Skip comments and empty lines
+		if (line[0] == '#' || line[0] == '\n' || line[0] == '\r' || line[0] == '\0') continue;
+
+		// Parse format: mfg_id,hdmi_limited,hdmi_audio_96k,composite_sync,name
+		// Example: 0x48F4,0,0,,Full-range CS5213 DAC
+		unsigned int mfg, limited, audio_96k = 0;
+		char name[64] = {0};
+		int8_t csync = -1; // Default to use MiSTer.ini setting
+
+		// Find commas to parse fields manually (to handle empty fields)
+		const char *comma1 = strchr(line, ',');
+		if (!comma1) continue;
+		const char *comma2 = strchr(comma1 + 1, ',');
+		if (!comma2) continue;
+		const char *comma3 = strchr(comma2 + 1, ',');
+		if (!comma3) continue;
+		const char *comma4 = strchr(comma3 + 1, ',');
+		if (!comma4) continue;
+
+		// Parse mfg_id, hdmi_limited, hdmi_audio_96k
+		if (sscanf(line, "%x,%u,%u", &mfg, &limited, &audio_96k) >= 2) {
+			// Parse composite_sync field (between comma3 and comma4)
+			if (comma4 - comma3 > 1) {
+				char csync_char = comma3[1];
+				if (csync_char == '0' || csync_char == '1') {
+					csync = (csync_char == '1') ? 1 : 0;
+				}
+			}
+
+			// Parse name (after comma4)
+			strncpy(name, comma4 + 1, 63);
+			// Remove newline if present
+			char *newline = strchr(name, '\n');
+			if (newline) *newline = '\0';
+			char *carriage = strchr(name, '\r');
+			if (carriage) *carriage = '\0';
+			// Check if this mfg_id already exists and update it
+			bool found = false;
+			for (int i = 0; i < dac_config_count; i++) {
+				if (dac_configs[i].mfg_id == mfg) {
+					dac_configs[i].hdmi_limited = limited;
+					dac_configs[i].hdmi_audio_96k = audio_96k;
+					dac_configs[i].composite_sync = csync;
+					strncpy(dac_configs[i].name, name, 63);
+					printf("  Updated DAC: mfg=0x%04X, hdmi_limited=%d, hdmi_audio_96k=%d, csync=%d, %s\n",
+						mfg, limited, audio_96k, csync, name);
+					found = true;
+					break;
+				}
+			}
+
+			if (!found) {
+				dac_configs[dac_config_count].mfg_id = mfg;
+				dac_configs[dac_config_count].hdmi_limited = limited;
+				dac_configs[dac_config_count].hdmi_audio_96k = audio_96k;
+				dac_configs[dac_config_count].composite_sync = csync;
+				strncpy(dac_configs[dac_config_count].name, name, 63);
+				printf("  DAC[%d]: mfg=0x%04X, hdmi_limited=%d, hdmi_audio_96k=%d, csync=%d, %s\n",
+					dac_config_count, mfg, limited, audio_96k, csync, name);
+				dac_config_count++;
+			}
+		}
+	}
+}
+
+static void load_dac_config()
+{
+	dac_config_count = 0;
+
+	// Try to load main DAC file
+	load_dac_file("dv_dac.txt");
+
+	// Load user DAC file (overrides/adds to main file)
+	load_dac_file("dv_dac_user.txt");
+
+	if (dac_config_count == 0) {
+		// If no files found, use built-in defaults
+		dac_configs[0].mfg_id = 0x48F4;
+		dac_configs[0].hdmi_limited = 0;
+		dac_configs[0].hdmi_audio_96k = 0;
+		dac_configs[0].composite_sync = -1;
+		strcpy(dac_configs[0].name, "Full-range DAC (built-in)");
+
+		dac_configs[1].mfg_id = 0x04EF;
+		dac_configs[1].hdmi_limited = 2;
+		dac_configs[1].hdmi_audio_96k = 0;
+		dac_configs[1].composite_sync = -1;
+		strcpy(dac_configs[1].name, "Limited-range DAC (built-in)");
+
+		dac_config_count = 2;
+		printf("No DAC config files found, using built-in defaults\n");
+	}
+
+	printf("Total: %d DAC configurations loaded\n", dac_config_count);
+}
+
+static int should_auto_enable_direct_video()
+{
+	// Load DAC config on first call
+	static bool dac_config_loaded = false;
+	if (!dac_config_loaded) {
+		load_dac_config();
+		dac_config_loaded = true;
+	}
+
+	// Read EDID if not already valid
+	if (!is_edid_valid()) {
+		get_active_edid();
+	}
+
+	if (!is_edid_valid()) return 0;
+
+	// Check manufacturer ID (bytes 0x08-0x09)
+	uint16_t mfg_id = (edid[0x08] << 8) | edid[0x09];
+
+	// Check against known DACs from config
+	for (int i = 0; i < dac_config_count; i++) {
+		if (mfg_id == dac_configs[i].mfg_id) {
+			printf("EDID: Detected known DAC: %s\n", dac_configs[i].name);
+			printf("EDID: Auto-enabling direct video with hdmi_limited=%d, hdmi_audio_96k=%d\n",
+				dac_configs[i].hdmi_limited, dac_configs[i].hdmi_audio_96k);
+			cfg.hdmi_limited = dac_configs[i].hdmi_limited;
+			cfg.hdmi_audio_96k = dac_configs[i].hdmi_audio_96k;
+
+			// Set composite sync if specified
+			if (dac_configs[i].composite_sync >= 0) {
+				cfg.csync = dac_configs[i].composite_sync;
+				printf("EDID: Auto-setting composite_sync=%d\n", dac_configs[i].composite_sync);
+			} else {
+				printf("EDID: Composite sync setting deferred to MiSTer.ini\n");
+			}
+			return 1;
+		}
+	}
+
+	// Not a known DAC, don't enable direct video
+	return 0;
+}
+
 static void video_mode_load()
 {
+	// Auto-detect and enable direct video if configured
+	if (cfg.direct_video == 2) {
+		if (should_auto_enable_direct_video()) {
+			printf("Auto-enabling direct video for known DAC.\n");
+			// Enable direct video, preserve all other user settings
+			cfg.direct_video = 1;
+		} else {
+			// Not a DAC, use normal HDMI mode
+			cfg.direct_video = 0;
+		}
+
+		// direct_video=2 resolves here, so refresh HDMI CSC with final mode.
+		hdmi_config_set_csc();
+	}
+
 	if (cfg.direct_video && cfg.vsync_adjust)
 	{
 		printf("Disabling vsync_adjust because of enabled direct video.\n");
@@ -2428,6 +2582,7 @@ int hasAPI1_5()
 static bool get_video_info(bool force, VideoInfo *video_info)
 {
 	static uint16_t nres = 0;
+	static bool vi_seen = false;
 	bool res_changed = false;
 	bool fb_changed = false;
 
@@ -2435,8 +2590,10 @@ static bool get_video_info(bool force, VideoInfo *video_info)
 	uint16_t res = spi_w(0);
 	if ((nres != res) || force)
 	{
+
 		res_changed = (nres != res);
 		nres = res;
+		if (res_changed) vi_seen = true;
 		video_info->width = spi_w(0) | (spi_w(0) << 16);
 		video_info->height = spi_w(0) | (spi_w(0) << 16);
 		video_info->htime = spi_w(0) | (spi_w(0) << 16);
@@ -2444,6 +2601,9 @@ static bool get_video_info(bool force, VideoInfo *video_info)
 		video_info->ptime = spi_w(0) | (spi_w(0) << 16);
 		video_info->vtimeh = spi_w(0) | (spi_w(0) << 16);
 		video_info->ctime = spi_w(0) | (spi_w(0) << 16);
+		video_info->pixrep = spi_w(0);
+		video_info->de_h = spi_w(0);
+		video_info->de_v = spi_w(0);
 		video_info->interlaced = ( res & 0x100 ) != 0;
 		video_info->rotated = ( res & 0x200 ) != 0;
 	}
@@ -2470,7 +2630,7 @@ static bool get_video_info(bool force, VideoInfo *video_info)
 	}
 	DisableIO();
 
-	return res_changed || fb_changed;
+	return vi_seen && (res_changed || fb_changed);
 }
 
 static void video_core_description(const VideoInfo *vi, const vmode_custom_t */*vm*/, char *str, size_t len)
@@ -2541,6 +2701,7 @@ static void show_video_info(const VideoInfo *vi, const vmode_custom_t *vm)
 
 	printf("\033[1;33mINFO: Video resolution: %u x %u%s, fHorz = %.1fKHz, fVert = %.1fHz, fPix = %.2fMHz, fVid = %.2fMHz\033[0m\n",
 		vi->width, vi->height, vi->interlaced ? "i" : "", hrate, vrate, prate, crate);
+	printf("\033[1;33mINFO: pr = %d, de_h = %d, de_v = %d\033[0m\n", vi->pixrep, vi->de_h, vi->de_v);
 	printf("\033[1;33mINFO: Frame time (100MHz counter): VGA = %d, HDMI = %d\033[0m\n", vi->vtime, vi->vtimeh);
 	printf("\033[1;33mINFO: AR = %d:%d, fb_en = %d, fb_width = %d, fb_height = %d\033[0m\n", vi->arx, vi->ary, vi->fb_en, vi->fb_width, vi->fb_height);
 	if (vi->vtimeh) api1_5 = 1;
@@ -2735,12 +2896,16 @@ bool video_mode_select(uint32_t vtime, vmode_custom_t* out_mode)
 
 static void set_yc_mode()
 {
+	// Enable YC for S-Video/CVBS modes, or subcarrier for CXA2075 encoders
 	if (cfg.vga_mode_int >= 2)
 	{
 		float fps = current_video_info.vtime ? (100000000.f / current_video_info.vtime) : 0.f;
 		int pal = fps < 55.f;
 		double CLK_REF = (pal || (cfg.ntsc_mode == 1)) ? 4.43361875f : (cfg.ntsc_mode == 2) ? 3.575611f : 3.579545f;
 		double CLK_VIDEO = current_video_info.ctime * 100.f / current_video_info.ptime;
+
+		float prate = current_video_info.width * 100.f;
+		prate /= current_video_info.ptime;
 
 		int64_t PHASE_INC = ((int64_t)((CLK_REF / CLK_VIDEO) * 1099511627776LL)) & 0xFFFFFFFFFFLL;
 
@@ -2749,12 +2914,14 @@ static void set_yc_mode()
 		int COLORBURST_RANGE = (COLORBURST_START << 10) | COLORBURST_END;
 
 		char yc_key[64];
+		char yc_key_expand[64];
 		sprintf(yc_key, "%s_%.1f%s%s", user_io_get_core_name(1), fps, current_video_info.interlaced ? "i" : "", (pal || !cfg.ntsc_mode) ? "" : (cfg.ntsc_mode == 1) ? "s" : "m");
+		snprintf(yc_key_expand, sizeof(yc_key_expand), "%s_%.2f", yc_key, prate);
 		printf("Calculated YC parameters for '%s': %s PHASE_INC=%lld, COLORBURST_START=%d, COLORBURST_END=%d\n", yc_key, pal ? "PAL" : (cfg.ntsc_mode == 1) ? "PAL60" : (cfg.ntsc_mode == 2) ? "PAL-M" : "NTSC", PHASE_INC, COLORBURST_START, COLORBURST_END);
 
 		for (uint i = 0; i < sizeof(yc_modes) / sizeof(yc_modes[0]); i++)
 		{
-			if (!strcasecmp(yc_modes[i].key, yc_key))
+		if (!strcasecmp(yc_modes[i].key, yc_key) || !strcasecmp(yc_modes[i].key, yc_key_expand))
 			{
 				printf("Override YC PHASE_INC with value: %lld\n", yc_modes[i].phase_inc);
 				PHASE_INC = yc_modes[i].phase_inc;
@@ -2763,17 +2930,95 @@ static void set_yc_mode()
 		}
 
 		spi_uio_cmd_cont(UIO_SET_YC_PAR);
-		spi_w(((pal || cfg.ntsc_mode) ? 4 : 0) | ((cfg.vga_mode_int == 3) ? 3 : 1));
+		// For traditional S-Video/CVBS modes, enable YC processing
+		// For subcarrier-only modes (RGB+subcarrier or direct video), keep yc_en=0
+		bool is_subcarrier_only = (cfg.vga_mode_int == 4);
+		uint16_t yc_config;
+		if (is_subcarrier_only) {
+			// Subcarrier-only: RGB mode with just PAL flag, yc_en=0
+			yc_config = ((pal || cfg.ntsc_mode) ? 4 : 0);
+		} else {
+			// Traditional YC modes: enable YC processing
+			yc_config = ((pal || cfg.ntsc_mode) ? 4 : 0) | ((cfg.vga_mode_int == 3) ? 3 : 1);
+		}
+		printf("Sending YC config to FPGA: 0x%02X (pal_en=%d, cvbs=%d, yc_en=%d)\n", yc_config, (yc_config >> 2) & 1, (yc_config >> 1) & 1, yc_config & 1);
+		spi_w(yc_config);
 		spi_w(PHASE_INC);
 		spi_w(PHASE_INC >> 16);
 		spi_w(PHASE_INC >> 32);
 		spi_w(COLORBURST_RANGE);
 		spi_w(COLORBURST_RANGE >> 16);
+		// Case 6: Send subcarrier enable flag
+		uint16_t subcarrier_enable = (cfg.vga_mode_int == 4) ? 1 : 0;
+		printf("Sending subcarrier enable to FPGA: %d\n", subcarrier_enable);
+		spi_w(subcarrier_enable);
 		DisableIO();
 	}
 	else
 	{
 		spi_uio_cmd8(UIO_SET_YC_PAR, 0);
+	}
+}
+
+static void spd_config_update()
+{
+	if (use_freesync_spd) return;
+
+	if (cfg.direct_video)
+	{
+		// Custom SPD IF for additional DV1 metadata
+		VideoInfo *vi = &current_video_info;
+		if (!vi->width) return;
+
+		uint8_t data[31] = {
+			0x83, 0x01, 25, 0,
+			'D',
+			'V',
+			'1', // version
+			(uint8_t)((vi->interlaced ? 1 : 0) | (menu_present() ? 4 : 0) | (vi->rotated ? 8 : 0) | (arcade_get_direction() << 4)),
+			(uint8_t)(vi->pixrep ? vi->pixrep : (vi->ctime / vi->width)),
+			(uint8_t)vi->de_h,
+			(uint8_t)(vi->de_h >> 8),
+			(uint8_t)vi->de_v,
+			(uint8_t)(vi->de_v >> 8),
+			(uint8_t)vi->width,
+			(uint8_t)(vi->width >> 8),
+			(uint8_t)vi->height,
+			(uint8_t)(vi->height >> 8)
+		};
+
+		char *name = user_io_get_core_name2();
+		for (int i = 17; i < 31; i++)
+		{
+			if (!*name) break;
+			data[i] = (uint8_t)(*name);
+			name++;
+		}
+
+		hdmi_spd_config(data);
+	}
+	else
+	{
+		// Standard SPD IF
+		uint8_t data[31] = {
+			0x83, 0x01, 25,                        // SPD IF header + length
+			0,                                    // Checksum, automatically calculated by ADV7513 if zero
+			'M', 'i', 'S', 'T', 'e', 'r', 0, 0, // Vendor Name (up to 8 characters)
+		};
+
+		// Product Description (up to 16 characters)
+		char *name = user_io_get_core_name2();
+		for (int i = 12; i < 28; i++)
+		{
+			if (!*name) break;
+			data[i] = (uint8_t)(*name);
+			name++;
+		}
+
+		// Source Information (see ANSI/CTA-861-I, Table 35 - Source Product Description InfoFrame Data Byte 25)
+		data[28] = 0x08; // Type: Game
+
+		hdmi_spd_config(data);
 	}
 }
 
@@ -2790,8 +3035,14 @@ void video_mode_adjust()
 		current_video_info = video_info;
 		show_video_info(&video_info, &v_cur);
 		set_yc_mode();
+		spd_config_update();
 	}
 	force = false;
+
+	static int menu = 0;
+	int menu_now = menu_present();
+	if(menu != menu_now) spd_config_update();
+	menu = menu_now;
 
 	if (vid_changed && !is_menu())
 	{
@@ -3207,7 +3458,7 @@ static char *get_file_fromdir(const char* dir, int num, int *count)
 		while (de)
 		{
 			int len = strlen(de->d_name);
-			if (len > 4 && (!strcasecmp(de->d_name + len - 4, ".png") || !strcasecmp(de->d_name + len - 4, ".jpg")))
+			if (len > 4 && (de->d_name[0] != '.') && (!strcasecmp(de->d_name + len - 4, ".png") || !strcasecmp(de->d_name + len - 4, ".jpg")))
 			{
 				if (num == cnt) break;
 				cnt++;
@@ -3649,6 +3900,23 @@ void video_cmd(char *cmd)
 	}
 }
 
+void video_mode_cmd(char *cmd)
+{
+	vmode_custom_t v = {};
+	int ret = parse_custom_video_mode(cmd, &v);
+	if (ret != -2)
+	{
+		printf("video_mode_cmd: only custom modelines are supported, got \"%s\"\n", cmd);
+		return;
+	}
+
+	v_def = v;
+	v_cur = v;
+	video_set_mode(&v, v.Fpix);
+	user_io_send_buttons(1);
+	printf("video_mode_cmd: applied mode \"%s\"\n", cmd);
+}
+
 static constexpr int CELL_GRAN_RND = 4;
 
 static int determine_vsync(int w, int h)
@@ -3800,3 +4068,12 @@ static void video_calculate_cvt(int h_pixels, int v_lines, float refresh_rate, i
 		video_calculate_cvt_int(h_pixels, v_lines, refresh_rate, 1, vmode);
 	}
 }
+
+
+
+int video_get_rotated()
+{
+  return current_video_info.rotated;
+}
+
+

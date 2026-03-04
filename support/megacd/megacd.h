@@ -37,6 +37,7 @@
 
 #define MCD_DATA_IO_INDEX 2
 #define MCD_SUB_IO_INDEX 3
+#define MCD_CDDA_IO_INDEX 4
 
 #include "../../cd.h"
 #include <libchdr/chd.h>
@@ -49,6 +50,7 @@ public:
 	uint8_t isData;
 	int loaded;
 	SendDataFunc SendData;
+	int (*CanSendData)(uint8_t type);
 
 	cdd_t();
 	int Load(const char *filename);
@@ -79,7 +81,7 @@ private:
 	int SubcodeSend();
 	void ReadData(uint8_t *buf);
 	int ReadCDDA(uint8_t *buf);
-	void ReadSubcode(uint16_t* buf);
+	int ReadSubcode(uint16_t* buf);
 	void LBAToMSF(int lba, msf_t* msf);
 	void MSFToLBA(int* lba, msf_t* msf);
 	void MSFToLBA(int* lba, uint8_t m, uint8_t s, uint8_t f);
@@ -98,6 +100,7 @@ void mcd_poll();
 void mcd_set_image(int num, const char *filename);
 void mcd_reset();
 int mcd_send_data(uint8_t* buf, int len, uint8_t index);
+int mcd_can_send_data(uint8_t type);
 void mcd_fill_blanksave(uint8_t *buffer, uint32_t lba);
 
 #endif

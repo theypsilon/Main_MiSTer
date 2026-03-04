@@ -185,45 +185,44 @@ static int isPathDirectory(const char *path, int use_zip = 1)
 	char *zip_path, *file_path;
 	if (use_zip && FileIsZipped(full_path, &zip_path, &file_path))
 	{
+		if (!*file_path)
+		{
+			return 1;
+		}
 
-      if (!*file_path)
-      {
-        return 1;
-      }
-
-      if (!OpenZipfileCached(full_path, 0))
-		  {
-			  printf("isPathDirectory(OpenZipfileCached) Zip:%s, error:%s\n", zip_path,
-			        mz_zip_get_error_string(mz_zip_get_last_error(&last_zip_archive)));
-			  return 0;
-		  }
+		if (!OpenZipfileCached(full_path, 0))
+		{
+			printf("isPathDirectory(OpenZipfileCached) Zip:%s, error:%s\n", zip_path,
+				mz_zip_get_error_string(mz_zip_get_last_error(&last_zip_archive)));
+			return 0;
+		}
 
 		// Folder names always end with a slash in the zip
 		// file central directory.
 		strcat(file_path, "/");
 
+		// Some zip files don't have directory entries
+		// Use the locate_file call to try and find the directory entry first, since
+		// this is a binary search (usually) If that fails then scan for the first
+		// entry that starts with file_path
 
-    // Some zip files don't have directory entries
-    // Use the locate_file call to try and find the directory entry first, since
-    // this is a binary search (usually) If that fails then scan for the first
-    // entry that starts with file_path
+		const int file_index = mz_zip_reader_locate_file(&last_zip_archive, file_path, NULL, 0);
+		if (file_index >= 0 && mz_zip_reader_is_file_a_directory(&last_zip_archive, file_index))
+		{
+			return 1;
+		}
 
-    const int file_index = mz_zip_reader_locate_file(&last_zip_archive, file_path, NULL, 0);
-    if (file_index >= 0 && mz_zip_reader_is_file_a_directory(&last_zip_archive, file_index))
-    {
-      return 1;
-    }
-
-    for (size_t i = 0; i < mz_zip_reader_get_num_files(&last_zip_archive); i++) {
-      char zip_fname[256];
-      mz_zip_reader_get_filename(&last_zip_archive, i, &zip_fname[0], sizeof(zip_fname));
-      if (strcasestr(zip_fname, file_path))
-      {
-        return 1;
-      }
-    }
-    return 0;
-  }
+		for (size_t i = 0; i < mz_zip_reader_get_num_files(&last_zip_archive); i++)
+		{
+			char zip_fname[256];
+			mz_zip_reader_get_filename(&last_zip_archive, i, &zip_fname[0], sizeof(zip_fname));
+			if (strcasestr(zip_fname, file_path))
+			{
+				return 1;
+			}
+		}
+		return 0;
+	}
 	else
 	{
 		int stmode = get_stmode(full_path);
@@ -246,17 +245,17 @@ static int isPathRegularFile(const char *path, int use_zip = 1)
 	char *zip_path, *file_path;
 	if (use_zip && FileIsZipped(full_path, &zip_path, &file_path))
 	{
-    //If there's no path into the zip file, don't bother opening it, we're a "directory"
-    if (!*file_path)
-    {
-      return 0;
-    }
-		  if (!OpenZipfileCached(full_path, 0))
-		  {
-			  //printf("isPathRegularFile(mz_zip_reader_init_file) Zip:%s, error:%s\n", zip_path,
-			  //       mz_zip_get_error_string(mz_zip_get_last_error(&z)));
-			  return 0;
-		  }
+		//If there's no path into the zip file, don't bother opening it, we're a "directory"
+		if (!*file_path)
+		{
+			return 0;
+		}
+		if (!OpenZipfileCached(full_path, 0))
+		{
+			//printf("isPathRegularFile(mz_zip_reader_init_file) Zip:%s, error:%s\n", zip_path,
+			//       mz_zip_get_error_string(mz_zip_get_last_error(&z)));
+			return 0;
+		}
 		const int file_index = mz_zip_reader_locate_file(&last_zip_archive, file_path, NULL, 0);
 		if (file_index < 0)
 		{
@@ -462,7 +461,19 @@ int FileOpenEx(fileTYPE *file, const char *name, int mode, char mute, int use_zi
 			if(!mute) printf("FileOpenEx(open) File:%s, error: %s.\n", full_path, strerror(errno));
 			return 0;
 		}
-		const char *fmode = mode & O_RDWR ? "w+" : "r";
+		const char *fmode;
+
+		switch (mode & O_ACCMODE) {
+		case O_RDONLY:
+			fmode = "r";
+			break;
+		case O_WRONLY:
+			fmode = "w";
+			break;
+		default:
+			fmode = "w+";
+			break;
+		}
 		file->filp = fdopen(fd, fmode);
 		if (!file->filp)
 		{
@@ -815,7 +826,7 @@ int FileCanWrite(const char *name)
 	return ((st.st_mode & S_IWUSR) != 0);
 }
 
-static void create_path(const char *base_dir, const char* sub_dir)
+void create_path(const char *base_dir, const char* sub_dir)
 {
 	make_fullpath(base_dir);
 	mkdir(full_path, S_IRWXU | S_IRWXG | S_IRWXO);
@@ -852,7 +863,7 @@ void FileGenerateScreenshotName(const char *name, char *out_name, int buflen)
 	}
 	else
 	{
-		create_path(SCREENSHOT_DIR, CoreName);
+		create_path(SCREENSHOT_DIR, CoreName2);
 
 		time_t t = time(NULL);
 		struct tm tm = *localtime(&t);
@@ -860,13 +871,13 @@ void FileGenerateScreenshotName(const char *name, char *out_name, int buflen)
 		if (tm.tm_year >= 119) // 2019 or up considered valid time
 		{
 			strftime(datecode, 31, "%Y%m%d_%H%M%S", &tm);
-			snprintf(out_name, buflen, "%s/%s/%s-%s.png", SCREENSHOT_DIR, CoreName, datecode, name[0] ? name : SCREENSHOT_DEFAULT);
+			snprintf(out_name, buflen, "%s/%s/%s-%s.png", SCREENSHOT_DIR, CoreName2, datecode, name[0] ? name : SCREENSHOT_DEFAULT);
 		}
 		else
 		{
 			for (int i = 1; i < 10000; i++)
 			{
-				snprintf(out_name, buflen, "%s/%s/NODATE-%s_%04d.png", SCREENSHOT_DIR, CoreName, name[0] ? name : SCREENSHOT_DEFAULT, i);
+				snprintf(out_name, buflen, "%s/%s/NODATE-%s_%04d.png", SCREENSHOT_DIR, CoreName2, name[0] ? name : SCREENSHOT_DEFAULT, i);
 				if (!getFileType(out_name)) return;
 			}
 		}
@@ -875,9 +886,9 @@ void FileGenerateScreenshotName(const char *name, char *out_name, int buflen)
 
 void FileGenerateSavePath(const char *name, char* out_name, int ext_replace)
 {
-	create_path(SAVE_DIR, CoreName);
+	create_path(SAVE_DIR, CoreName2);
 
-	sprintf(out_name, "%s/%s/", SAVE_DIR, CoreName);
+	sprintf(out_name, "%s/%s/", SAVE_DIR, CoreName2);
 	char *fname = out_name + strlen(out_name);
 
 	const char *p = strrchr(name, '/');
@@ -905,9 +916,11 @@ void FileGenerateSavePath(const char *name, char* out_name, int ext_replace)
 
 void FileGenerateSavestatePath(const char *name, char* out_name, int sufx)
 {
-	create_path(SAVESTATE_DIR, CoreName);
+	const char *subdir = is_arcade() ? "Arcade" : CoreName2;
 
-	sprintf(out_name, "%s/%s/", SAVESTATE_DIR, CoreName);
+	create_path(SAVESTATE_DIR, subdir);
+
+	sprintf(out_name, "%s/%s/", SAVESTATE_DIR, subdir);
 	char *fname = out_name + strlen(out_name);
 
 	const char *p = strrchr(name, '/');
@@ -940,16 +953,19 @@ uint32_t getFileType(const char *name)
 int findPrefixDir(char *dir, size_t dir_len)
 {
 	// Searches for the core's folder in the following order:
-	// /media/fat
 	// /media/usb<0..5>
 	// /media/usb<0..5>/games
+	// /media/network
+	// /media/network/games
 	// /media/fat/cifs
 	// /media/fat/cifs/games
+	// /media/fat
 	// /media/fat/games/
 	// if the core folder is not found anywhere,
 	// it will be created in /media/fat/games/<dir>
 	static char temp_dir[1024];
 
+	// Usb<0..5>
 	for (int x = 0; x < 6; x++) {
 		snprintf(temp_dir, 1024, "%s%d/%s", "../usb", x, dir);
 		if (isPathDirectory(temp_dir)) {
@@ -966,6 +982,23 @@ int findPrefixDir(char *dir, size_t dir_len)
 		}
 	}
 
+	// Network share in /media/network/
+	snprintf(temp_dir, 1024, "%s/%s", "../network", dir);
+	if (isPathDirectory(temp_dir)) {
+		printf("Found network dir: %s\n", temp_dir);
+		strncpy(dir, temp_dir, dir_len);
+		return 1;
+	}
+
+	// Network share in /media/network/games
+	snprintf(temp_dir, 1024, "%s/%s/%s", "../network", GAMES_DIR, dir);
+	if (isPathDirectory(temp_dir)) {
+		printf("Found network dir: %s\n", temp_dir);
+		strncpy(dir, temp_dir, dir_len);
+		return 1;
+	}
+
+	// CIFS_DIR directory in /media/fat/cifs
 	snprintf(temp_dir, 1024, "%s/%s", CIFS_DIR, dir);
 	if (isPathDirectory(temp_dir)) {
 		printf("Found CIFS dir: %s\n", temp_dir);
@@ -973,6 +1006,7 @@ int findPrefixDir(char *dir, size_t dir_len)
 		return 1;
 	}
 
+	// CIFS_DIR/GAMES_DIR directory in /media/fat/cifs/games
 	snprintf(temp_dir, 1024, "%s/%s/%s", CIFS_DIR, GAMES_DIR, dir);
 	if (isPathDirectory(temp_dir)) {
 		printf("Found CIFS dir: %s\n", temp_dir);
@@ -980,11 +1014,13 @@ int findPrefixDir(char *dir, size_t dir_len)
 		return 1;
 	}
 
+	// media/fat
 	if (isPathDirectory(dir)) {
 		printf("Found existing: %s\n", dir);
 		return 1;
 	}
 
+	// media/fat/GAMES_DIR
 	snprintf(temp_dir, 1024, "%s/%s", GAMES_DIR, dir);
 	if (isPathDirectory(temp_dir)) {
 		printf("Found dir: %s\n", temp_dir);
@@ -1239,33 +1275,22 @@ void AdjustDirectory(char *path)
 	}
 }
 
-static const char *GetRelativeFileName(const char *folder, const char *path) {
-  if (strcasestr(path, folder) == path) {
-    const char *subpath = path + strlen(folder);
-    if (*subpath != '\0')
-    {
-      if (*subpath == '/')
-      {
-        return subpath+1;
-      }
-      return subpath;
-    }
-  }
-  return NULL;
+static const char *GetRelativeFileName(const char *folder, const char *path)
+{
+	if (!*folder) return path;
+	if (strcasestr(path, folder) == path)
+	{
+		const char *subpath = path + strlen(folder);
+		if (*subpath == '/') return subpath + 1;
+	}
+	return NULL;
 }
 
 static bool IsInSameFolder(const char *folder, const char *path)
 {
-	if (strcasestr(path, folder) == path)
-	{
-		const char *subpath = path + strlen(folder) + 1;
-		if (*subpath != '\0')
-		{
-			const char *slash = strchr(subpath, '/');
-			return !slash || *(slash + 1) == '\0';
-		}
-	}
-	return false;
+	const char *p = strrchr(path, '/');
+	size_t len = p ? p - path : 0;
+	return (strlen(folder) == len) && !strncasecmp(path, folder, len);
 }
 
 static int names_loaded = 0;
@@ -1454,6 +1479,8 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 			}
 #endif
 			struct dirent64 _de = {};
+			int isZip = 0;
+
 			if (z)
 			{
 				mz_zip_reader_get_filename(z, i, &_de.d_name[0], sizeof(_de.d_name));
@@ -1610,7 +1637,14 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 					//skip non-selectable files
 					if (!strcasecmp(de->d_name, "menu.rbf")) continue;
 					if (!strncasecmp(de->d_name, "menu_20", 7)) continue;
-					if (!strcasecmp(de->d_name, "boot.rom")) continue;
+					if (!strncasecmp(de->d_name, "boot", 4))
+					{
+						int len = strlen(de->d_name);
+						if ((len == 8 || (len == 9 && de->d_name[4] >= '0' && de->d_name[4] <= '9')) && !strcasecmp(de->d_name + len - 4, ".rom"))
+						{
+							continue;
+						}
+					}
 
 					//check the prefix if given
 					if (prefix && strncasecmp(prefix, de->d_name, strlen(prefix))) continue;
@@ -1623,6 +1657,7 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 						{
 							// Fake that zip-file is a directory.
 							de->d_type = DT_DIR;
+							isZip = 1;
 							found = 1;
 						}
 						if (!found && is_minimig() && !memcmp(extension, "HDF", 3))
@@ -1670,6 +1705,8 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 			      direntext_t dext;
 				    memset(&dext, 0, sizeof(dext));
 				    memcpy(&dext.de, de, sizeof(dext.de));
+				    if (isZip)
+				        dext.flags |= DT_EXT_ZIP;
 				    get_display_name(&dext, extension, options);
 				    DirItem.push_back(dext);
         }
@@ -1740,7 +1777,8 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 			if(iSelectedEntry + 1 < flist_nDirEntries()) // scroll within visible items
 			{
 				iSelectedEntry++;
-				if (iSelectedEntry > iFirstEntry + OsdGetSize() - 1) iFirstEntry = iSelectedEntry - OsdGetSize() + 1;
+				// Start scrolling when cursor is cfg.lookahead positions from bottom
+				if (iSelectedEntry > iFirstEntry + OsdGetSize() - (cfg.lookahead + 1)) iFirstEntry = iSelectedEntry - OsdGetSize() + (cfg.lookahead + 1);
 			}
             else
             {
@@ -1755,45 +1793,105 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 			if (iSelectedEntry > 0) // scroll within visible items
 			{
 				iSelectedEntry--;
-				if (iSelectedEntry < iFirstEntry) iFirstEntry = iSelectedEntry;
+				// Start scrolling when cursor is cfg.lookahead positions from top
+				if (iSelectedEntry < iFirstEntry + cfg.lookahead) iFirstEntry = iSelectedEntry - cfg.lookahead;
+				if (iFirstEntry < 0) iFirstEntry = 0;
 			}
             return 0;
 		}
 		else if (mode == SCANF_NEXT_PAGE)
 		{
-			if (iSelectedEntry < iFirstEntry + OsdGetSize() - 2)
+			// Calculate cursor position relative to current page
+			int cursor_offset = iSelectedEntry - iFirstEntry;
+			
+			// Check if we're already on the last page (less than a full page left)
+			int remaining_entries = flist_nDirEntries() - iFirstEntry;
+			if (remaining_entries <= OsdGetSize())
 			{
-				iSelectedEntry = iFirstEntry + OsdGetSize() - 1;
-				if (iSelectedEntry >= flist_nDirEntries()) iSelectedEntry = flist_nDirEntries() - 1;
+				// On last page - allow cursor to go to actual last row
+				iSelectedEntry = flist_nDirEntries() - 1;
+				iFirstEntry = flist_nDirEntries() - OsdGetSize();
+				if (iFirstEntry < 0) iFirstEntry = 0;
 			}
 			else
 			{
-				iSelectedEntry += OsdGetSize();
+				// Move to next page
 				iFirstEntry += OsdGetSize();
-				if (iSelectedEntry >= flist_nDirEntries())
+				if (iFirstEntry >= flist_nDirEntries())
 				{
-					iSelectedEntry = flist_nDirEntries() - 1;
-					iFirstEntry = iSelectedEntry - OsdGetSize() + 1;
-					if (iFirstEntry < 0) iFirstEntry = 0;
-				}
-				else if (iFirstEntry + OsdGetSize() > flist_nDirEntries())
-				{
+					// At end, stay on last page
 					iFirstEntry = flist_nDirEntries() - OsdGetSize();
+					if (iFirstEntry < 0) iFirstEntry = 0;
+					iSelectedEntry = flist_nDirEntries() - 1;
+				}
+				else
+				{
+					// Special handling for top row - jump to cfg.lookahead positions from bottom
+					if (cursor_offset == 0)
+					{
+						iSelectedEntry = iFirstEntry + OsdGetSize() - (cfg.lookahead + 1);
+					}
+					else
+					{
+						// Maintain relative cursor position, but respect cfg.lookahead buffer from bottom
+						iSelectedEntry = iFirstEntry + cursor_offset;
+						
+						// If cursor would be on bottom cfg.lookahead rows of page, keep it at cfg.lookahead from bottom
+						if (cursor_offset >= OsdGetSize() - cfg.lookahead)
+						{
+							iSelectedEntry = iFirstEntry + OsdGetSize() - (cfg.lookahead + 1);
+						}
+					}
+					
+					// Ensure we don't go past the end
+					if (iSelectedEntry >= flist_nDirEntries())
+					{
+						iSelectedEntry = flist_nDirEntries() - 1;
+					}
 				}
 			}
 			return 0;
 		}
 		else if (mode == SCANF_PREV_PAGE)
 		{
-			if(iSelectedEntry != iFirstEntry)
+			// Calculate cursor position relative to current page
+			int cursor_offset = iSelectedEntry - iFirstEntry;
+			
+			// Check if we're already on the first page (less than a full page to go back)
+			if (iFirstEntry <= OsdGetSize())
 			{
-				iSelectedEntry = iFirstEntry;
+				// On first page - allow cursor to go to actual first row
+				iSelectedEntry = 0;
+				iFirstEntry = 0;
 			}
 			else
 			{
+				// Move to previous page
 				iFirstEntry -= OsdGetSize();
 				if (iFirstEntry < 0) iFirstEntry = 0;
-				iSelectedEntry = iFirstEntry;
+				
+				// Special handling for bottom row - jump to cfg.lookahead from top
+				if (cursor_offset == OsdGetSize() - 1)
+				{
+					iSelectedEntry = iFirstEntry + cfg.lookahead;
+				}
+				else
+				{
+					// Maintain relative cursor position, but respect cfg.lookahead buffer from top
+					iSelectedEntry = iFirstEntry + cursor_offset;
+					
+					// If cursor would be on top cfg.lookahead rows of page, keep it at cfg.lookahead from top
+					if (cursor_offset <= cfg.lookahead - 1)
+					{
+						iSelectedEntry = iFirstEntry + cfg.lookahead;
+					}
+				}
+				
+				// Ensure we don't go past the end
+				if (iSelectedEntry >= flist_nDirEntries())
+				{
+					iSelectedEntry = flist_nDirEntries() - 1;
+				}
 			}
 		}
 		else if (mode == SCANF_SET_ITEM)
@@ -1817,6 +1915,80 @@ int ScanDirectory(char* path, int mode, const char *extension, int options, cons
 				iSelectedEntry = pos;
 				if (iSelectedEntry + (OsdGetSize() / 2) >= flist_nDirEntries()) iFirstEntry = flist_nDirEntries() - OsdGetSize();
 				else iFirstEntry = iSelectedEntry - (OsdGetSize() / 2) + 1;
+				if (iFirstEntry < 0) iFirstEntry = 0;
+			}
+		}
+		else if (mode == SCANF_NEXT_CHAR)
+		{
+			//DirItem is sorted, so just advance until the first character changes.
+			//if we reach the end before that don't change anything.
+			//If we change d_type also consider that 'next'. This means next
+			//advances through directories, and then advances through files
+			//
+			int found = -1;
+			char curdType = DirItem[iSelectedEntry].de.d_type;
+			char curChar = DirItem[iSelectedEntry].altname[0]; 
+			if ((curChar == '_') && (curdType == DT_DIR) && (options & SCANO_CORES))
+				curChar = DirItem[iSelectedEntry].altname[1];
+			curChar = toupper(curChar);
+
+			for (int i = iSelectedEntry+1; i < flist_nDirEntries(); i++)
+			{
+				char tryChar = DirItem[i].altname[0];
+				if ((tryChar == '_') && (DirItem[i].de.d_type == DT_DIR) && (options & SCANO_CORES))
+					tryChar = DirItem[i].altname[1];
+				if (toupper(tryChar) != curChar || DirItem[i].de.d_type != curdType)
+				{
+					found = i;
+					break;
+				}
+			}
+			if (found >= 0)
+			{
+				iSelectedEntry = found;
+				if (iSelectedEntry + (OsdGetSize() / 2) >= flist_nDirEntries()) iFirstEntry = flist_nDirEntries() - OsdGetSize();
+				else iFirstEntry = iSelectedEntry - (OsdGetSize()/2) + 1;
+				if (iFirstEntry < 0) iFirstEntry = 0;
+			}
+		}
+		else if (mode == SCANF_PREV_CHAR)
+		{
+			//Previous seek seeks to the FIRST entry that starts with the previous letter
+			//Search backward until the first char changes, and then continue looking backward
+			//until it changes again. 
+
+
+			int found = -1;
+			char curdType = DirItem[iSelectedEntry].de.d_type;
+			bool sawChange = false;
+			char curChar = DirItem[iSelectedEntry].altname[0]; 
+			if ((curChar == '_') && (curdType == DT_DIR) && (options & SCANO_CORES))
+				curChar = DirItem[iSelectedEntry].altname[1];
+			curChar = toupper(curChar);
+			for (int i = iSelectedEntry-1; i >= 0; i--)
+			{
+				char tryChar = DirItem[i].altname[0];
+				if ((tryChar == '_') && (DirItem[i].de.d_type == DT_DIR) && (options & SCANO_CORES))
+					tryChar = DirItem[i].altname[1];
+				if (toupper(tryChar) != curChar || DirItem[i].de.d_type != curdType)
+				{
+					if (sawChange)
+					{
+						found = i+1;
+						break;
+					}
+					sawChange = true;
+					curChar = DirItem[i].altname[0];
+					if (curChar == '_')
+						curChar = DirItem[i].altname[1];
+					curChar = toupper(curChar);
+				}
+			}
+			if (found >= 0)
+			{
+				iSelectedEntry = found;
+				if (iSelectedEntry + (OsdGetSize() / 2) >= flist_nDirEntries()) iFirstEntry = flist_nDirEntries() - OsdGetSize();
+				else iFirstEntry = iSelectedEntry - (OsdGetSize()/2) + 1;
 				if (iFirstEntry < 0) iFirstEntry = 0;
 			}
 		}

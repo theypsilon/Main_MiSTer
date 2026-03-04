@@ -16,8 +16,9 @@
 #include <libchdr/chd.h>
 
 static char buf[1024];
-static uint8_t chd_hunkbuf[CD_FRAME_SIZE * CD_FRAMES_PER_HUNK];
+static uint8_t *chd_hunkbuf = NULL;
 static int chd_hunknum;
+static int noreset = 0;
 
 static int sgets(char *out, int sz, char **in)
 {
@@ -108,7 +109,7 @@ static void unload_chd(toc_t *table)
 	{
 		chd_close(table->chd_f);
 	}
-	memset(chd_hunkbuf, 0, sizeof(chd_hunkbuf));
+	if (chd_hunkbuf) free(chd_hunkbuf);
 	memset(table, 0, sizeof(toc_t));
 	chd_hunknum = -1;
 
@@ -141,12 +142,12 @@ static int load_chd(const char *filename, toc_t *table)
 	{
 		if (i == 0) //First track fakes a pregap even if it doesn't exist
 		{
-			table->tracks[i].index1 = 150;
+			table->tracks[i].indexes[1] = 150;
 			table->tracks[i].start = 150;
 			table->tracks[i].end += 150-1;
 		} else {
 			int frame_cnt = table->tracks[i].end - table->tracks[i].start;
-			frame_cnt += table->tracks[i].index1;
+			frame_cnt += table->tracks[i].indexes[1];
 			table->tracks[i].start = table->tracks[i-1].end + 1;
 			table->tracks[i].end = table->tracks[i].start + frame_cnt - 1;
 		}
@@ -154,7 +155,7 @@ static int load_chd(const char *filename, toc_t *table)
 
 	table->end = table->tracks[table->last - 1].end + 1;
 
-	memset(chd_hunkbuf, 0, sizeof(chd_hunkbuf));
+	chd_hunkbuf = (uint8_t *)malloc(table->chd_hunksize);
 	chd_hunknum = -1;
 
 	return 1;
@@ -247,13 +248,13 @@ static int load_cue(const char* filename, toc_t *table)
 			if (strstr(lptr, "MODE1/2352") || strstr(lptr, "MODE2/2352"))
 			{
 				table->tracks[table->last].sector_size = 2352;
-				table->tracks[table->last].type = 1;
+				table->tracks[table->last].type = TT_MODE1;
 				if (!table->last) table->end = 150; // implicit 2 seconds pregap for track 1
 			}
 			else if (strstr(lptr, "AUDIO"))
 			{
 				table->tracks[table->last].sector_size = 2352;
-				table->tracks[table->last].type = 0;
+				table->tracks[table->last].type = TT_CDDA;
 			}
 			else
 			{
@@ -290,45 +291,39 @@ static int load_cue(const char* filename, toc_t *table)
           table->tracks[table->last-1].end = table->tracks[table->last].start-1;
           if (pregap)
           {
-            table->tracks[table->last].index1 = table->tracks[table->last].start - pregap;
+            table->tracks[table->last].indexes[1] = table->tracks[table->last].start - pregap;
             if (!table->tracks[table->last].pregap)
             {
-              table->tracks[table->last].offset -= 2352*table->tracks[table->last].index1;
-              table->tracks[table->last].index1 = table->tracks[table->last].start - pregap;
+              table->tracks[table->last].offset -= 2352*table->tracks[table->last].indexes[1];
+              table->tracks[table->last].indexes[1] = table->tracks[table->last].start - pregap;
             } else {
-              table->tracks[table->last].index1 = pregap;
+              table->tracks[table->last].indexes[1] = pregap;
             }
           }
         } else if (table->tracks[table->last].type) {
-          table->tracks[table->last].index1 = 150;
+          table->tracks[table->last].indexes[1] = 150;
         }
 			}
 			else
 			{
-				table->tracks[table->last].index1 = bb + ss * 75 + mm * 60 * 75;
-				if (table->tracks[table->last].type && !table->last) table->tracks[table->last].index1 = 150;
+				table->tracks[table->last].indexes[1] = bb + ss * 75 + mm * 60 * 75;
+				if (table->tracks[table->last].type && !table->last) table->tracks[table->last].indexes[1] = 150;
 				table->tracks[table->last].start = table->end;
 				table->end += (table->tracks[table->last].f.size / table->tracks[table->last].sector_size);
-				table->tracks[table->last].end = table->end - 1;
 				table->tracks[table->last].offset = 0;
 			}
+			table->tracks[table->last].end = table->end - 1;
 			table->last++;
 			if (table->last >= 99) break;
 		}
 	}
 
-  if (!table->tracks[table->last].end && table->tracks[table->last].offset)
-  {
-    //Single bin CUE, calculate the end of the last track based on file size.
-    table->tracks[table->last].end = (table->tracks[0].f.size-table->tracks[table->last].offset) / table->tracks[0].sector_size;
-  }
-
 	/*
 	for (int i = 0; i < table->last; i++)
 	{
 		printf("\x1b[32mPSX: Track = %u, start = %u, end = %u, offset = %d, sector_size=%d, type = %u\n\x1b[0m", i, table->tracks[i].start, table->tracks[i].end, table->tracks[i].offset, table->tracks[i].sector_size, table->tracks[i].type);
-		if (table->tracks[i].index1)
-			printf("\x1b[32mPSX: Track = %u,Index1 = %u seconds\n\x1b[0m", i, table->tracks[i].index1 / 75);
+		if (table->tracks[i].indexes[1])
+			printf("\x1b[32mPSX: Track = %u,Index1 = %u seconds\n\x1b[0m", i, table->tracks[i].indexes[1] / 75);
 
 	}*/
 
@@ -401,7 +396,7 @@ static void send_cue_and_metadata(toc_t *table, uint16_t libcrypt_mask, enum reg
 		for (int i = 0; i < table->last; i++)
 		{
 			printf("\x1b[32mPSX: Track = %u, start = %u, end = %u, offset = %d, sector_size=%d, type = %u\n\x1b[0m", i, table->tracks[i].start, table->tracks[i].end, table->tracks[i].offset, table->tracks[i].sector_size, table->tracks[i].type);
-			if (table->tracks[i].index1) printf("\x1b[32mPSX: Track = %u,Index1 = %u seconds\n\x1b[0m", i, table->tracks[i].index1 / 75);
+			if (table->tracks[i].indexes[1]) printf("\x1b[32mPSX: Track = %u,Index1 = %u seconds\n\x1b[0m", i, table->tracks[i].indexes[1] / 75);
 		}
 
 		memset(disk, 0, sizeof(disk_t));
@@ -418,8 +413,8 @@ static void send_cue_and_metadata(toc_t *table, uint16_t libcrypt_mask, enum reg
 		{
 			disk->track[i].start_lba = i ? table->tracks[i].start : 0;
 			disk->track[i].end_lba = table->tracks[i].end;
-			m = ((disk->track[i].start_lba + table->tracks[i].index1) / 75) / 60;
-			s = ((disk->track[i].start_lba + table->tracks[i].index1) / 75) % 60;
+			m = ((disk->track[i].start_lba + table->tracks[i].indexes[1]) / 75) / 60;
+			s = ((disk->track[i].start_lba + table->tracks[i].indexes[1]) / 75) % 60;
 			disk->track[i].bcd = ((BCD(m) << 8) | BCD(s)) | ((table->tracks[i].type ? 0 : 1) << 16);
 		}
 
@@ -467,6 +462,15 @@ void psx_fill_blanksave(uint8_t *buffer, uint32_t lba, int cnt)
 static toc_t toc = {};
 #define CD_SECTOR_LEN 2352
 
+int psx_chd_hunksize()
+{
+	if (toc.chd_f)
+		return toc.chd_hunksize;
+
+	return 0;
+}
+
+
 void psx_read_cd(uint8_t *buffer, int lba, int cnt)
 {
 	//printf("req lba=%d, cnt=%d\n", lba, cnt);
@@ -496,12 +500,12 @@ void psx_read_cd(uint8_t *buffer, int lba, int cnt)
 					}
 					while (cnt)
 					{
-            if (toc.tracks[i+1].pregap && lba > (toc.tracks[i+1].start-toc.tracks[i+1].index1)) 
+            if (toc.tracks[i+1].pregap && lba > (toc.tracks[i+1].start-toc.tracks[i+1].indexes[1]))
             {
               //The TOC is setup so that pregap sectors are actually part of the
               //PREVIOUS track. If the pregap field is set the file doesn't contain
               //this data, so we have to fake it. 
-              //Check the next track's pregap and index1 values to determine
+              //Check the next track's pregap and indexes[1] values to determine
               //if we're reading pregap sectors
               
 
@@ -511,7 +515,7 @@ void psx_read_cd(uint8_t *buffer, int lba, int cnt)
 						{
 
 							// The "fake" 150 sector pregap moves all the LBAs up by 150, so adjust here to read where the core actually wants data from
-							int read_lba = lba - toc.tracks[0].index1;
+							int read_lba = lba - toc.tracks[0].indexes[1];
 							if (mister_chd_read_sector(toc.chd_f, (read_lba + toc.tracks[i].offset), 0, 0, CD_SECTOR_LEN, buffer, chd_hunkbuf, &chd_hunknum) == CHDERR_NONE)
 							{
 								if (!toc.tracks[i].type) //CHD requires byteswap of audio data
@@ -695,6 +699,12 @@ void psx_mount_cd(int f_index, int s_index, const char *filename)
 				region = game_info.region;
 			printf("Game ID: %s, region: %s\n", game_id, region_string(region));
 
+			// Write game ID if it's not empty (BIOS check is handled in user_io_write_gameid)
+			if (game_id && game_id[0] != '\0')
+			{
+				user_io_write_gameid(filename, 0, game_id);
+			}
+
 			int name_len = strlen(filename);
 
 			if (toc.tracks[0].type) // is first track a data?
@@ -707,12 +717,12 @@ void psx_mount_cd(int f_index, int s_index, const char *filename)
 
 				if (!same_game)
 				{
-					reset = 1;
-					if (old_len)
+					if (!noreset && old_len)
 					{
 						strcat(last_dir, "/noreset.txt");
-						reset = !FileExists(last_dir);
+						noreset = FileExists(last_dir);
 					}
+					reset = !noreset;
 
 					strcpy(last_dir, filename);
 					char *p = strrchr(last_dir, '/');
@@ -772,10 +782,10 @@ void psx_mount_cd(int f_index, int s_index, const char *filename)
 				mask = libCryptMask(&sbi_file);
 			}
 
+			process_ss(filename, name_len != 0);
 			send_cue_and_metadata(&toc, mask, region, reset);
 
 			user_io_set_index(f_index);
-			process_ss(filename, name_len != 0);
 
 			mount_cd(toc.end*CD_SECTOR_LEN, s_index);
 			loaded = 1;
@@ -794,4 +804,9 @@ void psx_mount_cd(int f_index, int s_index, const char *filename)
 void psx_poll()
 {
 	spi_uio_cmd(UIO_CD_GET);
+}
+
+void psx_reset()
+{
+	noreset = 0;
 }

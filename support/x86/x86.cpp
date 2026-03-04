@@ -47,7 +47,6 @@
 #define CFG_VER     3
 
 #define SHMEM_ADDR  0x30000000
-#define BIOS_SIZE   0x10000
 
 #define IOWR(base, reg, value) x86_dma_set((base) + (reg), value)
 
@@ -212,7 +211,7 @@ typedef struct
 	char img_name[6][1024];
 } x86_config;
 
-static x86_config config;
+static x86_config config = {};
 
 struct hddInfo* FindHDDInfoBySize(uint64_t size)
 {
@@ -299,17 +298,38 @@ static void x86_dma_recvbuf(uint32_t address, uint32_t length, uint32_t *data)
 	DisableIO();
 }
 
-static int load_bios(const char* name, uint8_t index)
+static int mem_set(uint32_t offset, uint8_t fill_byte, uint32_t size)
+{
+	void *buf = shmem_map(SHMEM_ADDR + offset, size);
+	if (!buf) return 0;
+
+	memset(buf, fill_byte, size);
+	shmem_unmap(buf, size);
+
+	return 1;
+}
+
+static int load_rom(const char* name, uint32_t mem_offset)
 {
 	printf("BIOS: %s\n", name);
 
-	void *buf = shmem_map(SHMEM_ADDR + (index ? 0xC0000 : 0xF0000), BIOS_SIZE);
-	if (!buf) return 0;
+	fileTYPE f;
+	if (!FileOpen(&f, name)) return 0;
 
-	memset(buf, 0, BIOS_SIZE);
-	FileLoad(name, buf, BIOS_SIZE);
-	shmem_unmap(buf, BIOS_SIZE);
+	uint32_t size = f.size;
 
+	void *buf = shmem_map(SHMEM_ADDR + mem_offset, size);
+	if (!buf)
+	{
+		FileClose(&f);
+		return 0;
+	}
+
+	memset(buf, 0, size);
+	FileReadAdv(&f, buf, size);
+	shmem_unmap(buf, size);
+
+	FileClose(&f);
 	return 1;
 }
 
@@ -508,6 +528,11 @@ static uint8_t bin2bcd(unsigned val)
 	return ((val / 10) << 4) + (val % 10);
 }
 
+void x86_ide_set()
+{
+	for (int i = 0; i < 4; i++) hdd_set(i, config.img_name[i + 2]);
+}
+
 void x86_init()
 {
 	user_io_status_set("[0]", 1);
@@ -516,8 +541,13 @@ void x86_init()
 
 	if (is_x86())
 	{
-		load_bios(user_io_make_filepath(home, "boot0.rom"), 0);
-		load_bios(user_io_make_filepath(home, "boot1.rom"), 1);
+		// PC-DOS/MS-DOS/Win3.x/Win9x recognize 0xFF as free memory (UMA),
+		// otherwise it can be incorrectly interpreted as used by Option RAM (non-free).
+		mem_set(0xA0000, 0xFF, 0x60000); // Fill UMA (640 kb - 1 Mb) with 0xFF
+		mem_set(0xA0000, 0x00, 0x20000); // Clear Video RAM
+		mem_set(0xCE000, 0x00, 0x2000);  // Clear shr_rgn
+		load_rom(user_io_make_filepath(home, "boot1.rom"), 0xC0000); // Video BIOS ROM
+		load_rom(user_io_make_filepath(home, "boot0.rom"), 0xF0000); // BIOS ROM
 	}
 
 	uint16_t cfg = ide_check();
@@ -534,6 +564,10 @@ void x86_init()
 	for (int i = 0; i < 4; i++) hdd_set(i, config.img_name[i + 2]);
 
 	//-------------------------------------------------------------------------- rtc
+
+	// memcfg 0: 256MB
+	// memcfg 1:  16MB
+	uint8_t memcfg = is_x86() ? user_io_status_get("[11]") : 1;
 
 	unsigned char translate_mode = 1; //LBA
 	translate_mode = (translate_mode << 6) | (translate_mode << 4) | (translate_mode << 2) | translate_mode;
@@ -569,7 +603,7 @@ void x86_init()
 		0x80, //0x15: base memory in 1k LSB
 		0x02, //0x16: base memory in 1k MSB
 		0x00, //0x17: memory size above 1m in 1k LSB
-		0xFC, //0x18: memory size above 1m in 1k MSB
+		(uint8_t)(memcfg ? 0x3C : 0xFC), //0x18: memory size above 1m in 1k MSB
 		0x00, //0x19: extended hd types 1/2; type 47d (unused)
 		0x00, //0x1A: extended hd types 2/2 (unused)
 
@@ -599,13 +633,13 @@ void x86_init()
 		0x00, //0x2F: checksum LSB
 
 		0x00, //0x30: memory size above 1m in 1k LSB
-		0x3C, //0x31: memory size above 1m in 1k MSB
+		(uint8_t)(memcfg ? 0x3C : 0xFC), //0x31: memory size above 1m in 1k MSB
 
 		0x20, //0x32: IBM century
 		0x00, //0x33: ?
 
-		0x80, //0x34: memory size above 16m in 64k LSB
-		0x0E, //0x35: memory size above 16m in 64k MSB; 256-8 MB
+		(uint8_t)(memcfg ? 0x00 : 0x80), //0x34: memory size above 16m in 64k LSB
+		(uint8_t)(memcfg ? 0x00 : 0x0E), //0x35: memory size above 16m in 64k MSB; 256-8 MB
 
 		0x00, //0x36: ?
 		0x20, //0x37: IBM PS/2 century
@@ -719,19 +753,21 @@ static void fdd_io(uint8_t read)
 	}
 }
 
-void x86_poll()
+void x86_poll(int only_ide)
 {
-	x86_share_poll();
+	if(!only_ide) x86_share_poll();
 
 	uint16_t sd_req = ide_check();
 	if (sd_req)
 	{
+		if (sd_req & 0x400) ide_cdda_send_sector();
+
 		ide_io(0, sd_req & 7);
 		sd_req >>= 3;
 		ide_io(1, sd_req & 7);
 
 		sd_req >>= 3;
-		if (sd_req & 3) fdd_io(sd_req & 1);
+		if (!only_ide && (sd_req & 3)) fdd_io(sd_req & 1);
 	}
 }
 

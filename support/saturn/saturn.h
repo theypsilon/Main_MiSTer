@@ -57,11 +57,16 @@ public:
 	void CommandExec();
 	uint8_t* GetStatus();
 	int SetCommand(uint8_t* data);
+	int GetBootHeader(uint8_t *buf);
+
+	bool wwf_hack;
+	bool roadrash_hack;
 
 private:
 	toc_t toc;
 	int lba;
 	int track;
+	int index;
 	int seek_lba;
 	uint16_t sectorSize;
 	int toc_pos;
@@ -70,36 +75,51 @@ private:
 	bool stop_pend;
 	bool seek_pend;
 	bool read_pend;
+	bool final_read;
 	bool seek_ring;
 	bool seek_ring2;
 	bool pause_pend;
 	bool read_toc;
+	int seek_delay;
 	uint8_t stat[12];
 	uint8_t comm[12];
 	uint8_t cd_buf[4096 + 2];
 	int audioLength;
 	int audioFirst;
+	int chd_hunknum;
+	uint8_t *chd_hunkbuf;
+	int chd_audio_read_lba;
+
 
 	int LoadCUE(const char* filename);
 	void LBAToMSF(int lba, msf_t* msf);
+	int CalcSeekDelay(int lba_old, int lba_new);
 	int GetFAD(uint8_t* cmd);
+	int GetSectorOffsetByIndex(int tno, int idx);
 	void SetChecksum(uint8_t* stat);
 	int CheckCommand(uint8_t* cmd);
 	void ReadData(uint8_t *buf);
 	int ReadCDDA(uint8_t *buf, int first);
 	void MakeSecureRingData(uint8_t *buf);
+	uint32_t DataSectorCalcCRC(uint8_t* buf, int len);
 	int DataSectorSend(uint8_t* header, int speed);
 	int AudioSectorSend(int first);
 	int RingDataSend(uint8_t* header, int speed);
 };
 
 extern satcdd_t satcdd;
-extern uint32_t frame_cnt;
+extern uint32_t saturn_frame_cnt;
+
+
+#define CD_DATA_IO_INDEX	0x8
+#define BOOT_IO_INDEX	    0xC
+#define SAVE_IO_INDEX		0x4 // fake download to trigger save loading
 
 void saturn_poll();
 void saturn_set_image(int num, const char *filename);
 void saturn_reset();
 void saturn_fill_blanksave(uint8_t *buffer, uint32_t lba);
 int saturn_send_data(uint8_t* buf, int len, uint8_t index);
+void saturn_mount_save(const char *filename, bool is_auto = false);
 
 #endif

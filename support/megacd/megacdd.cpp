@@ -23,6 +23,7 @@ cdd_t::cdd_t() {
 	chd_hunkbuf = NULL;
 	chd_hunknum = -1;
 	SendData = NULL;
+	CanSendData = NULL;
 
 	stat[0] = 0xB;
 	stat[1] = 0x0;
@@ -157,7 +158,7 @@ int cdd_t::LoadCUE(const char* filename) {
 
 				if (this->toc.tracks[0].sector_size)
 				{
-					this->toc.tracks[0].type = 1;
+					this->toc.tracks[0].type = TT_MODE1;
 
 					FileReadAdv(&this->toc.tracks[0].f, header, 0x210);
 					FileSeek(&this->toc.tracks[0].f, 0, SEEK_SET);
@@ -263,7 +264,7 @@ int cdd_t::Load(const char *filename)
 			free(this->chd_hunkbuf);
 		}
 
-		this->chd_hunkbuf = (uint8_t *)malloc(CD_FRAME_SIZE * CD_FRAMES_PER_HUNK);
+		this->chd_hunkbuf = (uint8_t *)malloc(this->toc.chd_hunksize);
 		this->chd_hunknum = -1;
  	} else {
 		return (-1);
@@ -371,7 +372,12 @@ void cdd_t::Update() {
 			this->latency--;
 			return;
 		}
-		this->status = this->loaded ? CD_STAT_TOC : CD_STAT_NO_DISC;
+		// Neo Geo CDZ does not like the status changing to TOC here.
+		//this->status = this->loaded ? CD_STAT_TOC : CD_STAT_NO_DISC;
+		if (!this->loaded)
+		{
+			this->status = CD_STAT_NO_DISC;
+		}
 	}
 	else if (this->status == CD_STAT_SEEK)
 	{
@@ -396,6 +402,11 @@ void cdd_t::Update() {
 			return;
 		}
 
+		if (CanSendData && !CanSendData(this->toc.tracks[this->index].type))
+		{
+			// Not ready yet to receive sector
+			return;
+		}
 
 		if (this->toc.tracks[this->index].type)
 		{
@@ -409,7 +420,6 @@ void cdd_t::Update() {
 			header[3] = 0x01;
 
 			SectorSend(header);
-
 		}
 		else
 		{
@@ -449,6 +459,7 @@ void cdd_t::Update() {
 			else
 			{
 				this->lba = this->toc.end;
+				this->chd_audio_read_lba = this->lba;
 				this->status = CD_STAT_END;
 				this->isData = 0x01;
 				return;
@@ -466,6 +477,8 @@ void cdd_t::Update() {
 				this->lba = 0;
 			}
 		}
+
+		this->chd_audio_read_lba = this->lba;
 
 		this->isData = this->toc.tracks[this->index].type;
 
@@ -551,6 +564,9 @@ void cdd_t::CommandExec() {
 		break;
 
 	case CD_COMM_TOC:
+		if (this->status == CD_STAT_STOP) {
+			this->status = CD_STAT_TOC;
+		}
 		switch (comm[3]) {
 		case 0: {
 			int lba_ = this->lba + 150;
@@ -600,6 +616,7 @@ void cdd_t::CommandExec() {
 			stat[8] = 0;
 
 			//printf("\x1b[32mMCD: Command TOC 2, index = %i, command = %02X%02X%02X%02X%02X%02X%02X%02X%02X%02X, status = %02X%08X, frame = %u\n\x1b[0m", this->index, comm[9], comm[8], comm[7], comm[6], comm[5], comm[4], comm[3], comm[2], comm[1], comm[0], (uint32_t)(GetStatus() >> 32), (uint32_t)GetStatus(), frame);
+
 		}
 			break;
 
@@ -980,8 +997,9 @@ void InterleaveSubcode(uint8_t *subc_data, uint16_t *buf)
 	}
 }
 
-void cdd_t::ReadSubcode(uint16_t* buf)
+int cdd_t::ReadSubcode(uint16_t* buf)
 {
+	int err = 0;
 	uint8_t subc[96];
 	if (this->toc.chd_f)
 	{
@@ -991,11 +1009,17 @@ void cdd_t::ReadSubcode(uint16_t* buf)
 		} else if (this->toc.tracks[this->index].sbc_type == SUBCODE_RW) {
 			mister_chd_read_sector(this->toc.chd_f, this->chd_audio_read_lba + this->toc.tracks[this->index].offset, 0, CD_MAX_SECTOR_DATA, 96, subc, this->chd_hunkbuf, &this->chd_hunknum);
 			InterleaveSubcode(subc, buf);
+		} else {
+			err = -1;
 		}
 	} else if (this->toc.sub.opened()) {
 		FileReadAdv(&this->toc.sub, subc, 96);
 		InterleaveSubcode(subc, buf);
+	} else {
+		err = -1;
 	}
+
+	return err;
 }
 
 
@@ -1003,18 +1027,20 @@ int cdd_t::SectorSend(uint8_t* header)
 {
 	uint8_t buf[2352 + 2352];
 	int len = 2352;
+	uint8_t index = MCD_DATA_IO_INDEX;
 
 	if (header) {
 		memcpy(buf + 12, header, 4);
 		ReadData(buf + 16);
 	}
 	else {
+		index = MCD_CDDA_IO_INDEX;
 		len = ReadCDDA(buf);
 	}
 
 	SubcodeSend();
 	if (SendData)
-		return SendData(buf, len, MCD_DATA_IO_INDEX);
+		return SendData(buf, len, index);
 
 	return 0;
 }
@@ -1024,9 +1050,9 @@ int cdd_t::SubcodeSend()
 {
 	uint16_t buf[98 / 2];
 
-	ReadSubcode(buf);
+	int err = ReadSubcode(buf);
 
-	if (SendData)
+	if (!err && SendData)
 		return SendData((uint8_t*)buf, 98, MCD_SUB_IO_INDEX);
 
 	return 0;

@@ -41,6 +41,8 @@ typedef struct {
 	uint8_t recents;
 	uint16_t jamma_vid;
 	uint16_t jamma_pid;
+	uint16_t jamma2_vid;
+	uint16_t jamma2_pid;
 	uint16_t no_merge_vid;
 	uint16_t no_merge_pid;
 	uint32_t no_merge_vidpid[256];
@@ -70,6 +72,7 @@ typedef struct {
 	char shmask_default[1023];
 	char preset_default[1023];
 	char player_controller[6][8][256];
+	char controller_deadzone[32][256];
 	uint8_t rumble;
 	uint8_t wheel_force;
 	uint16_t wheel_range;
@@ -92,6 +95,14 @@ typedef struct {
 	char vga_mode_int;
 	char ntsc_mode;
 	uint32_t controller_unique_mapping[256];
+	char osd_lock[25];
+	uint16_t osd_lock_time;
+	char debug;
+	uint8_t lookahead;
+	char main[1024];
+	char vfilter_interlace_default[1023];
+	char autofire_rates[256];
+
 } cfg_t;
 
 extern cfg_t cfg;
